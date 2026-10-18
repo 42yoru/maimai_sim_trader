@@ -1,0 +1,318 @@
+"""整轮流程集成测试：用假 ctx / 假妙想 / 假行情跑通 _run_round。
+
+覆盖的是编排层：拉数据 → 决策 → 下单前校验 → 播报 → 状态落盘。
+真正的网络和模型调用不在这里验（那部分靠真机）。
+"""
+
+from __future__ import annotations
+
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+import importlib.util
+import json
+import sys
+import tempfile
+import unittest
+from unittest import mock
+
+from maibot_sdk import PluginContext, PluginPaths
+
+PLUGIN_DIR = Path(__file__).resolve().parents[1]
+MODULE_NAME = "maimai_sim_trader"
+
+
+def _load_plugin_module() -> Any:
+    """按 Runner 的加载方式导入插件包。"""
+
+    spec = importlib.util.spec_from_file_location(
+        MODULE_NAME,
+        str(PLUGIN_DIR / "plugin.py"),
+        submodule_search_locations=[str(PLUGIN_DIR)],
+    )
+    if spec is None or spec.loader is None:
+        raise RuntimeError("无法为插件创建 import spec")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[MODULE_NAME] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+_load_plugin_module()
+
+PLUGIN_MODULE = sys.modules[MODULE_NAME]
+QUOTES = sys.modules[f"{MODULE_NAME}.quotes"]
+STATE = sys.modules[f"{MODULE_NAME}.state"]
+WATCH = sys.modules[f"{MODULE_NAME}.watchlist"]
+
+GROUP_ID = "982628545"
+GROUP_SESSION = "group-session-1"
+
+DECISION_TEXT = json.dumps(
+    {
+        "mood": "手有点痒",
+        "reasoning": "空仓太久，先拿三成试水",
+        "actions": [
+            {"action": "buy", "code": "601899", "name": "紫金矿业", "quantity": 3400, "reason": "放量走强"},
+            {"action": "buy", "code": "600309", "name": "万华化学", "quantity": 1500, "reason": "领涨"},
+        ],
+        "pool_change": {"add": [{"code": "601988", "name": "中国银行"}], "remove": ["600660"]},
+        "next_check_minutes": 60,
+        "speech": "先伸一只脚试试水",
+    },
+    ensure_ascii=False,
+)
+
+
+class FakeMx:
+    """假的妙想客户端，记录下单。"""
+
+    def __init__(self) -> None:
+        self.placed: List[Dict[str, Any]] = []
+
+    async def get_balance(self) -> Dict[str, Any]:
+        return {
+            "totalAssets": 1000000.0,
+            "availBalance": 1000000.0,
+            "totalPosValue": 0.0,
+            "initMoney": 1000000.0,
+            "nav": 1.0,
+            "totalPosPct": 0.0,
+        }
+
+    async def get_positions(self) -> List[Dict[str, Any]]:
+        return []
+
+    async def get_orders(self) -> List[Dict[str, Any]]:
+        return []
+
+    async def place_order(self, *, direction: str, stock_code: str, price: float, quantity: int) -> Dict[str, Any]:
+        self.placed.append({"direction": direction, "code": stock_code, "price": price, "quantity": quantity})
+        return {"orderId": f"fake-{len(self.placed)}", "status": "accepted"}
+
+    async def close(self) -> None:
+        return None
+
+
+class FakeQuotes:
+    """假行情：价格跟真实值差不多。"""
+
+    PRICES = {"601899": 29.92, "600309": 66.24, "600660": 54.78, "601988": 6.92}
+
+    async def fetch(self, codes: Any) -> Dict[str, Any]:
+        result: Dict[str, Any] = {}
+        for code in codes:
+            if code not in self.PRICES:
+                continue
+            price = self.PRICES[code]
+            result[code] = QUOTES.Quote(
+                code=code,
+                name=code,
+                price=price,
+                prev_close=price,
+                open_price=price,
+                high=price,
+                low=price,
+                change=0.0,
+                change_pct=0.0,
+                volume_lots=1000.0,
+                turnover_wan=1000.0,
+                turnover_rate=1.0,
+                pe=10.0,
+                updated_at="20261019100000",
+            )
+        return result
+
+    async def close(self) -> None:
+        return None
+
+
+class FakeHarness:
+    """假的宿主：拦截 llm.generate / send.text / chat.*。"""
+
+    def __init__(self) -> None:
+        self.sent: List[Dict[str, str]] = []
+        self.llm_prompts: List[Any] = []
+
+    async def rpc(self, method: str, plugin_id: str, payload: Dict[str, Any], timeout_ms: Optional[int] = None) -> Any:
+        del method, plugin_id, timeout_ms
+        capability = payload["capability"]
+        args = payload["args"]
+        if capability == "llm.generate":
+            self.llm_prompts.append(args.get("prompt"))
+            return {"success": True, "response": DECISION_TEXT, "reasoning": "", "model": "fake"}
+        if capability == "send.text":
+            self.sent.append({"stream_id": args["stream_id"], "text": args["text"]})
+            return {"success": True, "sent": True, "message_id": "m1"}
+        if capability == "chat.get_group_streams":
+            return [{"session_id": GROUP_SESSION, "group_id": GROUP_ID, "group_name": "熟人社会", "account_id": "1000"}]
+        if capability == "chat.get_private_streams":
+            return []
+        raise AssertionError(f"未预期的能力调用: {capability}")
+
+
+def build_plugin(tmp_dir: Path) -> Any:
+    """构造一个装好假依赖的插件实例。"""
+
+    plugin = PLUGIN_MODULE.SimTraderPlugin()
+    config = PLUGIN_MODULE.SimTraderPlugin.build_default_config()
+    config["mx"]["api_key"] = "test-key"
+    config["notify"]["group_ids"] = [GROUP_ID]
+    plugin.set_plugin_config(config)
+
+    paths = PluginPaths(data_dir=tmp_dir / "data", runtime_dir=tmp_dir / "runtime")
+    ctx = PluginContext(PLUGIN_MODULE.SimTraderPlugin.__name__, rpc_call=FakeHarness().rpc, paths=paths)
+    plugin._set_context(ctx)
+
+    plugin._watchlist = WATCH.WatchlistStore(paths.data_dir / "watchlist.json")
+    plugin._state = STATE.StateStore(paths.data_dir / "state.json")
+    plugin._watchlist.load()
+    plugin._state.load()
+    plugin._mx = FakeMx()
+    plugin._quotes = FakeQuotes()
+    return plugin
+
+
+class RoundFlowTests(unittest.IsolatedAsyncioTestCase):
+    """整轮编排。"""
+
+    async def test_dry_run_never_places_order(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plugin = build_plugin(Path(tmp))
+            notes = await plugin._run_round(datetime(2026, 10, 19, 10, 0), "2026-10-19", dry_run=True)
+            self.assertEqual(len(plugin._mx.placed), 0)
+            buy_notes = [note for note in notes if note.startswith("（试跑）会买")]
+            self.assertEqual(len(buy_notes), 2)
+
+    async def test_live_round_places_orders_and_broadcasts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plugin = build_plugin(Path(tmp))
+            harness = FakeHarness()
+
+            async def rpc(method: str, plugin_id: str, payload: Dict[str, Any], timeout_ms: Optional[int] = None) -> Any:
+                if payload["capability"] == "llm.generate" and len(harness.llm_prompts) >= 1:
+                    # 第二次 llm 调用是播报文案，返回一句人话
+                    harness.llm_prompts.append(payload["args"].get("prompt"))
+                    return {"success": True, "response": "先伸一只脚试试水～", "reasoning": "", "model": "fake"}
+                return await harness.rpc(method, plugin_id, payload, timeout_ms=timeout_ms)
+
+            plugin.ctx._rpc_call = rpc
+
+            notes = await plugin._run_round(datetime(2026, 10, 19, 10, 0), "2026-10-19")
+            self.assertEqual(len(plugin._mx.placed), 2)
+            self.assertEqual(plugin._mx.placed[0]["code"], "601899")
+            self.assertEqual(plugin._mx.placed[0]["quantity"], 3400)
+            self.assertEqual(len(harness.sent), 1)
+            self.assertEqual(harness.sent[0]["stream_id"], GROUP_SESSION)
+            self.assertIn("试试水", harness.sent[0]["text"])
+            self.assertTrue(notes)
+
+    async def test_dry_run_keeps_pool_untouched(self) -> None:
+        """试跑不留副作用：池子不该被改。"""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            plugin = build_plugin(Path(tmp))
+            notes = await plugin._run_round(datetime(2026, 10, 19, 10, 0), "2026-10-19", dry_run=True)
+            codes = {item.code for item in plugin._watchlist.all()}
+            self.assertIn("600660", codes)
+            self.assertNotIn("601988", codes)
+            self.assertTrue(any("会加入" in note for note in notes))
+
+    async def test_live_round_applies_pool_change(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plugin = build_plugin(Path(tmp))
+            await plugin._run_round(datetime(2026, 10, 19, 10, 0), "2026-10-19")
+            codes = {item.code for item in plugin._watchlist.all()}
+            self.assertIn("601988", codes)
+            self.assertNotIn("600660", codes)
+
+    async def test_state_updated_after_live_round(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plugin = build_plugin(Path(tmp))
+            plugin._state.load().roll_date("2026-10-19")
+            await plugin._run_round(datetime(2026, 10, 19, 10, 0), "2026-10-19")
+            state = plugin._state.load()
+            self.assertEqual(state.check_count, 1)
+            self.assertEqual(state.trade_count, 2)
+            self.assertEqual(state.last_mood, "手有点痒")
+            self.assertGreater(state.next_check_at, 0.0)
+            self.assertEqual(state.trade_date, "2026-10-19")
+
+    async def test_missing_group_stream_does_not_crash(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plugin = build_plugin(Path(tmp))
+
+            async def rpc(method: str, plugin_id: str, payload: Dict[str, Any], timeout_ms: Optional[int] = None) -> Any:
+                if payload["capability"] == "chat.get_group_streams":
+                    return []
+                if payload["capability"] == "llm.generate":
+                    return {"success": True, "response": DECISION_TEXT, "reasoning": "", "model": "fake"}
+                raise AssertionError(payload["capability"])
+
+            plugin.ctx._rpc_call = rpc
+            await plugin._run_round(datetime(2026, 10, 19, 10, 0), "2026-10-19")
+            # 找不到群只是跳过播报，不影响下单
+            self.assertEqual(len(plugin._mx.placed), 2)
+
+
+class TickTests(unittest.IsolatedAsyncioTestCase):
+    """_tick 的时间判断：什么时段该干活、什么时段该闭嘴。"""
+
+    def _patch_now(self, moment: datetime) -> Any:
+        fake = mock.MagicMock()
+        fake.now.return_value = moment
+        return mock.patch.object(PLUGIN_MODULE, "datetime", fake)
+
+    async def test_runs_inside_trading_session(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plugin = build_plugin(Path(tmp))
+            with self._patch_now(datetime(2026, 10, 19, 10, 0)):
+                await plugin._tick()
+            self.assertEqual(len(plugin._mx.placed), 2)
+
+    async def test_skips_lunch_break(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plugin = build_plugin(Path(tmp))
+            with self._patch_now(datetime(2026, 10, 19, 12, 0)):
+                await plugin._tick()
+            self.assertEqual(len(plugin._mx.placed), 0)
+
+    async def test_skips_weekend(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plugin = build_plugin(Path(tmp))
+            with self._patch_now(datetime(2026, 10, 17, 10, 0)):
+                await plugin._tick()
+            self.assertEqual(len(plugin._mx.placed), 0)
+
+    async def test_respects_next_check_at(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plugin = build_plugin(Path(tmp))
+            state = plugin._state.load()
+            state.next_check_at = 9e18
+            plugin._state.save()
+            with self._patch_now(datetime(2026, 10, 19, 10, 0)):
+                await plugin._tick()
+            self.assertEqual(len(plugin._mx.placed), 0)
+
+    async def test_failure_pushes_next_check_forward(self) -> None:
+        """决策失败时必须把下次时间推后，否则会一分钟一轮地烧模型。"""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            plugin = build_plugin(Path(tmp))
+
+            async def broken_rpc(method: str, plugin_id: str, payload: Dict[str, Any], timeout_ms: Optional[int] = None) -> Any:
+                if payload["capability"] == "llm.generate":
+                    return {"success": False, "error": "boom"}
+                raise AssertionError(payload["capability"])
+
+            plugin.ctx._rpc_call = broken_rpc
+            with self._patch_now(datetime(2026, 10, 19, 10, 0)):
+                with self.assertRaises(RuntimeError):
+                    await plugin._tick()
+            state = plugin._state.load()
+            self.assertGreater(state.next_check_at, 0.0)
+
+
+if __name__ == "__main__":
+    unittest.main()

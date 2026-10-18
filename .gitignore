@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+*.tmp
+
+# 本地配置里有妙想 API Key，绝不提交
+config.toml
+
+# 本地运行数据
+data/
+logs/
+.venv/
