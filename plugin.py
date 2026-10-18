@@ -1,6 +1,6 @@
-"""麦麦模拟盘（sim-trader）插件入口。
+"""模拟盘（sim-trader）插件入口。
 
-让麦麦用自己的判断去炒一个东财妙想模拟组合，然后在指定群/私聊里汇报盈亏。
+让它用自己的判断去炒一个东财妙想模拟组合，然后在指定群/私聊里汇报盈亏。
 数据分两层：妙想负责账户与深度查询，腾讯快照负责盘中报价（快、免额度）。
 纯插件实现，不改主程序。
 """
@@ -42,7 +42,7 @@ class PluginSectionConfig(PluginConfigBase):
     __ui_order__ = 0
 
     enabled: bool = Field(default=True, description="是否启用插件")
-    config_version: str = Field(default="0.3.1", description="配置版本")
+    config_version: str = Field(default="0.3.2", description="配置版本")
 
 
 class MxSectionConfig(PluginConfigBase):
@@ -166,7 +166,7 @@ def in_sessions(now: datetime, sessions: Sequence[Tuple[dt_time, dt_time]]) -> b
 
 
 class SimTraderPlugin(MaiBotPlugin):
-    """麦麦模拟盘插件。"""
+    """模拟盘插件。"""
 
     config_model = SimTraderConfig
 
@@ -195,7 +195,7 @@ class SimTraderPlugin(MaiBotPlugin):
         self._state.load()
         await self._load_persona()
         self.ctx.logger.info(
-            "麦麦模拟盘已加载：池子 %d 只，数据目录 %s",
+            "模拟盘已加载：池子 %d 只，数据目录 %s",
             len(self._watchlist.all()),
             data_dir,
         )
@@ -234,7 +234,7 @@ class SimTraderPlugin(MaiBotPlugin):
         """配置热更新：重建客户端并重启循环。"""
 
         del config_data
-        self.ctx.logger.info("麦麦模拟盘收到配置更新: scope=%s version=%s", scope, version)
+        self.ctx.logger.info("模拟盘收到配置更新: scope=%s version=%s", scope, version)
         if scope == "bot":
             await self._load_persona()
         if scope == "self":
@@ -288,10 +288,10 @@ class SimTraderPlugin(MaiBotPlugin):
 
         await self._stop_loop()
         if not self.config.plugin.enabled or not self.config.schedule.enabled:
-            self.ctx.logger.info("麦麦模拟盘后台循环未启动（插件或节奏未启用）")
+            self.ctx.logger.info("模拟盘后台循环未启动（插件或节奏未启用）")
             return
         self._task = asyncio.create_task(self._run_loop(), name="maimai_sim_trader.loop")
-        self.ctx.logger.info("麦麦模拟盘后台循环已启动")
+        self.ctx.logger.info("模拟盘后台循环已启动")
 
     async def _stop_loop(self) -> None:
         """停止后台循环。"""
@@ -317,7 +317,7 @@ class SimTraderPlugin(MaiBotPlugin):
             except asyncio.CancelledError:
                 raise
             except Exception:
-                self.ctx.logger.error("麦麦模拟盘循环出错", exc_info=True)
+                self.ctx.logger.error("模拟盘循环出错", exc_info=True)
             await asyncio.sleep(self.config.schedule.idle_sleep_seconds)
 
     async def _tick(self) -> None:
@@ -794,7 +794,7 @@ class SimTraderPlugin(MaiBotPlugin):
     async def _handle_dry_run(self, stream_id: str) -> None:
         """立刻跑一轮决策，但不下单、不播报、不写状态。"""
 
-        await self._send(stream_id, "麦麦去看一眼盘，稍等一下……")
+        await self._send(stream_id, f"{self._bot_name or DEFAULT_BOT_NAME}去看一眼盘，稍等一下……")
         now = datetime.now()
         today = now.strftime("%Y-%m-%d")
         try:

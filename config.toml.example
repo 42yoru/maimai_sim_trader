@@ -1,6 +1,6 @@
 [plugin]
 enabled = true
-config_version = "0.3.1"
+config_version = "0.3.2"
 
 [mx]
 # 东方财富妙想 API Key，mkt_v_ 开头；留空则读环境变量 MX_APIKEY

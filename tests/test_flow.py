@@ -314,5 +314,31 @@ class TickTests(unittest.IsolatedAsyncioTestCase):
             self.assertGreater(state.next_check_at, 0.0)
 
 
+    async def test_dry_run_uses_host_bot_name(self) -> None:
+        """试跑提示语要用宿主昵称，不能写死。"""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            plugin = build_plugin(Path(tmp))
+            plugin._bot_name = "小爱"
+            sent: List[str] = []
+
+            async def rpc(method: str, plugin_id: str, payload: Dict[str, Any], timeout_ms: Optional[int] = None) -> Any:
+                capability = payload["capability"]
+                if capability == "send.text":
+                    sent.append(payload["args"]["text"])
+                    return {"success": True, "sent": True, "message_id": "m1"}
+                if capability == "llm.generate":
+                    return {"success": True, "response": DECISION_TEXT, "reasoning": "", "model": "fake"}
+                if capability == "chat.get_group_streams":
+                    return []
+                raise AssertionError(capability)
+
+            plugin.ctx._rpc_call = rpc
+            await plugin._handle_dry_run("stream-x")
+            self.assertTrue(sent)
+            self.assertIn("小爱", sent[0])
+            self.assertNotIn("麦麦", sent[0])
+
+
 if __name__ == "__main__":
     unittest.main()
