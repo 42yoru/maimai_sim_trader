@@ -25,9 +25,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install httpx ruff
-          # maibot-sdk 没有发布到 PyPI，从官方仓库装
-          pip install "maibot-sdk @ git+https://github.com/Mai-with-u/maibot-plugin-sdk.git"
+          pip install httpx maibot-plugin-sdk ruff
 
       - name: Lint
         run: ruff check . --select E,F,W,B --line-length 130
