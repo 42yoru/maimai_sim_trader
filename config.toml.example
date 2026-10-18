@@ -1,6 +1,6 @@
 [plugin]
 enabled = true
-config_version = "0.3.0"
+config_version = "0.3.1"
 
 [mx]
 # 东方财富妙想 API Key，mkt_v_ 开头；留空则读环境变量 MX_APIKEY
@@ -38,7 +38,7 @@ decision_model = ""
 report_task_name = "replyer"
 report_model = ""
 temperature = 0.7
-max_tokens = 900
+max_tokens = 2400
 
 [notify]
 platform = "qq"
@@ -52,7 +52,3 @@ private_user_ids = ["1215349250"]
 private_enabled = false
 close_report_enabled = true
 close_report_after = "15:00"
-
-[persona]
-# 决策和播报时的自称。换成你自己的 bot 名字即可
-name = "麦麦"

@@ -13,8 +13,8 @@ from .positions import Holding
 MAX_GROUP_CHARS = 220
 MAX_PRIVATE_CHARS = 600
 
-REPORT_SYSTEM_PROMPT = """你是{bot_name}，正在替主人炒一个 A 股模拟盘账户。
-现在要向{where}汇报盘面情况。
+REPORT_SYSTEM_PROMPT = """{header}
+你在替主人炒一个 A 股模拟盘账户，现在要向{where}汇报盘面情况。
 
 怎么写：
 1. 用你自己的口吻，像真的在跟人说话，不要写报表。
@@ -54,6 +54,7 @@ def build_snapshot_lines(balance: Dict[str, Any], positions: Sequence[Holding]) 
 def build_report_messages(
     *,
     bot_name: str,
+    persona: str = "",
     where: str,
     group_style: bool,
     snapshot_lines: Sequence[str],
@@ -63,12 +64,13 @@ def build_report_messages(
 ) -> List[Dict[str, str]]:
     """拼出播报用的 messages。"""
 
+    header = persona.strip() or f"你是{bot_name}。"
     if group_style:
         limit_rule = f"整段话控制在 {MAX_GROUP_CHARS} 字以内，像在群里随手发的一条消息。"
-        system = REPORT_SYSTEM_PROMPT.format(bot_name=bot_name, where=where, limit_rule=limit_rule)
+        system = REPORT_SYSTEM_PROMPT.format(header=header, where=where, limit_rule=limit_rule)
     else:
         system = REPORT_SYSTEM_PROMPT.format(
-            bot_name=bot_name,
+            header=header,
             where=where,
             limit_rule=f"可以详细一点，但不超过 {MAX_PRIVATE_CHARS} 字。",
         )

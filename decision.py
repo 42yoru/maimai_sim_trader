@@ -61,8 +61,9 @@ class Decision:
     speech: str = ""
 
 
-SYSTEM_PROMPT = """你是{bot_name}，正在替主人打理一个 A 股模拟盘账户。
-你不是冷静的量化机器，你有情绪：赚了会得意，亏了会难受，看到好机会会兴奋——但下单必须讲纪律。
+SYSTEM_PROMPT = """{header}
+你现在在替主人打理一个 A 股模拟盘账户。
+你有自己的情绪：赚了会得意，亏了会难受，看到好机会会兴奋——但下单必须讲纪律。
 
 规则（必须遵守）：
 1. 只能买卖股票池里的股票；想买池子外的票，先把它加进池子再说。
@@ -216,6 +217,7 @@ def build_messages(
     recent_notes: Sequence[str],
     idle_note: str = "",
     bot_name: str = "麦麦",
+    persona: str = "",
 ) -> List[Dict[str, str]]:
     """拼出本轮决策用的 messages。"""
 
@@ -252,8 +254,9 @@ def build_messages(
             "请判断这一轮要不要动，并按格式输出 JSON。",
         ]
     )
+    header = persona.strip() or f"你是{bot_name}。"
     return [
-        {"role": "system", "content": SYSTEM_PROMPT.replace("{bot_name}", bot_name)},
+        {"role": "system", "content": SYSTEM_PROMPT.replace("{header}", header)},
         {"role": "user", "content": user_text},
     ]
 

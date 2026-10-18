@@ -43,8 +43,10 @@ cp maimai_sim_trader/config.toml.example maimai_sim_trader/config.toml
 | `[mx]` | `api_key` | 妙想 API Key（`mkt_v_` 开头），**别提交到仓库**；留空读环境变量 `MX_APIKEY` |
 | `[account]` | `slippage` / `max_position_ratio` / `min_cash_reserve_ratio` / `max_trades_per_day` | 让价、单票上限、现金底线、当日笔数上限 |
 | `[schedule]` | `sessions` / `min_interval_minutes` / `max_interval_minutes` | 交易时段与她自选间隔的合法范围 |
-| `[model]` | `decision_task_name` / `report_task_name` | 默认决策用 `planner`、播报用 `replyer`；留空跟随宿主默认 |
+| `[model]` | `decision_task_name` / `report_task_name` / `max_tokens` | 默认决策用 `planner`、播报用 `replyer`；`max_tokens` 默认 2400，思考型模型给小了会只有思考没有正文 |
 | `[notify]` | `group_ids` / `private_user_ids` / `private_enabled` | 群播报默认开；私聊功能已实现但默认关 |
+
+**人设不在插件里配。** 启动时从宿主读 `bot.nickname`（自称）和 `personality.personality`（人格），决策和播报都用你自己 bot 的那一套——插件本身不带任何角色设定。宿主没配人设时退回通用称呼「麦麦」并在日志里警告。
 
 ## 命令
 

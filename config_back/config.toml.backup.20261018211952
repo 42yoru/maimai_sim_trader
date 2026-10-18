@@ -1,0 +1,58 @@
+[plugin]
+enabled = true
+config_version = "0.3.0"
+
+[mx]
+# 东方财富妙想 API Key，mkt_v_ 开头。别把这里的内容提交到任何公开仓库
+api_key = "mkt_v_57PdNQQSgDY-VyEJm-3MJHlifF_lJqEMzAxPn9fxo"
+base_url = "https://mkapi2.dfcfs.com/finskillshub"
+timeout = 20.0
+
+[account]
+# 妙想里已绑定的模拟组合名称，仅用于播报与日志
+label = "模拟组合9072966"
+# 限价单让价比例：买入往上让、卖出往下让，0.003 即 0.3%
+slippage = 0.003
+# 单票市值占总资产上限
+max_position_ratio = 0.2
+# 买入后至少保留的现金比例
+min_cash_reserve_ratio = 0.2
+# 单日最多下几笔单
+max_trades_per_day = 6
+
+[schedule]
+enabled = true
+# 交易时段，格式 HH:MM-HH:MM
+sessions = ["09:30-11:30", "13:00-15:00"]
+# 模型没给下次间隔时的默认值（她每轮都能自己决定下次多久再看）
+default_interval_minutes = 30
+min_interval_minutes = 10
+max_interval_minutes = 240
+idle_sleep_seconds = 60
+startup_delay_seconds = 20
+
+[model]
+# 决策用 planner（结构化输出更稳），播报用 replyer（她平时说话的那个）
+decision_task_name = "planner"
+decision_model = ""
+report_task_name = "replyer"
+report_model = ""
+temperature = 0.7
+max_tokens = 900
+
+[notify]
+platform = "qq"
+# 只认这个账号下的聊天流，留空不限
+account_id = ""
+# 播报到哪个群
+group_ids = ["982628545"]
+group_enabled = true
+# 私聊播报（功能已做好，先关着）
+private_user_ids = ["1215349250"]
+private_enabled = false
+close_report_enabled = true
+close_report_after = "15:00"
+
+[persona]
+# 决策和播报时的自称。换成你自己的 bot 名字即可
+name = "麦麦"

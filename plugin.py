@@ -26,6 +26,7 @@ from .trading import LOT_SIZE, check_sell, limit_price, resolve_quantity
 from .watchlist import WatchlistStore
 
 LOGGER_NAME = "maimai.sim-trader"
+DEFAULT_BOT_NAME = "麦麦"
 DEFAULT_SESSIONS = ("09:30-11:30", "13:00-15:00")
 TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 
@@ -41,7 +42,7 @@ class PluginSectionConfig(PluginConfigBase):
     __ui_order__ = 0
 
     enabled: bool = Field(default=True, description="是否启用插件")
-    config_version: str = Field(default="0.3.0", description="配置版本")
+    config_version: str = Field(default="0.3.1", description="配置版本")
 
 
 class MxSectionConfig(PluginConfigBase):
@@ -101,7 +102,7 @@ class ModelSectionConfig(PluginConfigBase):
     report_task_name: str = Field(default="replyer", description="播报用的模型任务名，留空用宿主默认")
     report_model: str = Field(default="", description="播报用的具体模型名，留空跟随任务")
     temperature: float = Field(default=0.7, ge=0.0, le=2.0, description="决策温度")
-    max_tokens: int = Field(default=900, ge=200, le=4000, description="决策输出上限")
+    max_tokens: int = Field(default=2400, ge=200, le=8000, description="决策输出上限；思考型模型要给足，否则正文会被挤空")
 
 
 class NotifySectionConfig(PluginConfigBase):
@@ -121,16 +122,6 @@ class NotifySectionConfig(PluginConfigBase):
     close_report_after: str = Field(default="15:00", description="几点之后允许发收盘复盘")
 
 
-class PersonaSectionConfig(PluginConfigBase):
-    """人设配置。"""
-
-    __ui_label__ = "人设"
-    __ui_icon__ = "user-round"
-    __ui_order__ = 6
-
-    name: str = Field(default="麦麦", description="播报和决策时使用的自称；换成你自己的 bot 名字")
-
-
 class SimTraderConfig(PluginConfigBase):
     """插件总配置。"""
 
@@ -140,7 +131,6 @@ class SimTraderConfig(PluginConfigBase):
     schedule: ScheduleSectionConfig = Field(default_factory=ScheduleSectionConfig)
     model: ModelSectionConfig = Field(default_factory=ModelSectionConfig)
     notify: NotifySectionConfig = Field(default_factory=NotifySectionConfig)
-    persona: PersonaSectionConfig = Field(default_factory=PersonaSectionConfig)
 
 
 # ──── 时间与时段 ────
@@ -189,24 +179,45 @@ class SimTraderPlugin(MaiBotPlugin):
         self._state: Optional[StateStore] = None
         self._group_stream_cache: Dict[str, str] = {}
         self._private_stream_cache: Dict[str, str] = {}
+        self._bot_name = ""
+        self._bot_persona = ""
         self._busy = False
 
     # ──── 生命周期 ────
 
     async def on_load(self) -> None:
-        """初始化落盘目录、客户端与后台循环。"""
+        """初始化落盘目录、读取宿主人设、启动后台循环。"""
 
         data_dir = self.ctx.paths.data_dir
         self._watchlist = WatchlistStore(data_dir / "watchlist.json")
         self._state = StateStore(data_dir / "state.json")
         self._watchlist.load()
         self._state.load()
+        await self._load_persona()
         self.ctx.logger.info(
             "麦麦模拟盘已加载：池子 %d 只，数据目录 %s",
             len(self._watchlist.all()),
             data_dir,
         )
         await self._restart_loop()
+
+    async def _load_persona(self) -> None:
+        """从 MaiBot 本体读取昵称与人设，插件不再自己定义一份。
+
+        读不到时退回通用称呼——人设缺失不该让交易挂掉，但要在日志里说清楚。
+        """
+
+        nickname = str(await self.ctx.config.get("bot.nickname", "") or "").strip()
+        persona = str(await self.ctx.config.get("personality.personality", "") or "").strip()
+        self._bot_name = nickname or DEFAULT_BOT_NAME
+        self._bot_persona = persona
+        if persona:
+            self.ctx.logger.info("已从宿主人设读取：昵称=%s，人设 %d 字", self._bot_name, len(persona))
+        else:
+            self.ctx.logger.warning(
+                "宿主没有配置 personality.personality，播报将使用通用称呼「%s」",
+                self._bot_name,
+            )
 
     async def on_unload(self) -> None:
         """停掉循环、关掉连接。"""
@@ -224,6 +235,8 @@ class SimTraderPlugin(MaiBotPlugin):
 
         del config_data
         self.ctx.logger.info("麦麦模拟盘收到配置更新: scope=%s version=%s", scope, version)
+        if scope == "bot":
+            await self._load_persona()
         if scope == "self":
             if self._mx is not None:
                 await self._mx.close()
@@ -448,7 +461,8 @@ class SimTraderPlugin(MaiBotPlugin):
             pending_orders=pending,
             recent_notes=state.recent_notes,
             idle_note=self._idle_note(state, now.strftime("%Y-%m-%d")),
-            bot_name=self.config.persona.name,
+            bot_name=self._bot_name or DEFAULT_BOT_NAME,
+            persona=self._bot_persona,
         )
         result = await self.ctx.llm.generate(
             messages,
@@ -460,6 +474,13 @@ class SimTraderPlugin(MaiBotPlugin):
         if not result.get("success"):
             raise RuntimeError(f"模型调用失败: {result.get('error') or result}")
         text = str(result.get("response") or "")
+        if not text.strip():
+            # 思考型模型会把额度全花在 reasoning 上，正文一空就必然是 max_tokens 不够
+            reasoning_chars = len(str(result.get("reasoning") or ""))
+            raise RuntimeError(
+                f"模型只输出了思考过程（{reasoning_chars} 字）没有正文，"
+                f"把 [model] max_tokens 调大试试（当前 {self.config.model.max_tokens}）"
+            )
         decision = parse_decision(text)
         self.ctx.logger.info(
             "决策完成：心情=%s 动作=%d 下次=%d 分钟 理由=%s",
@@ -607,7 +628,8 @@ class SimTraderPlugin(MaiBotPlugin):
         text = ""
         try:
             messages = build_report_messages(
-                bot_name=self.config.persona.name,
+                bot_name=self._bot_name or DEFAULT_BOT_NAME,
+                persona=self._bot_persona,
                 where="群里",
                 group_style=True,
                 snapshot_lines=snapshot_lines,
