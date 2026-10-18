@@ -340,5 +340,86 @@ class TickTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("麦麦", sent[0])
 
 
+OWNER_USER = "1215349250"
+STRANGER_USER = "999999999"
+
+
+class CommandTests(unittest.IsolatedAsyncioTestCase):
+    """命令分派、主人校验、宽松行情查询。"""
+
+    async def _dispatch(self, plugin: Any, rest: str, *, user_id: str) -> List[str]:
+        sent: List[str] = []
+
+        async def rpc(method: str, plugin_id: str, payload: Dict[str, Any], timeout_ms: Optional[int] = None) -> Any:
+            capability = payload["capability"]
+            if capability == "send.text":
+                sent.append(payload["args"]["text"])
+                return {"success": True, "sent": True, "message_id": "m1"}
+            if capability == "llm.generate":
+                return {"success": True, "response": DECISION_TEXT, "reasoning": "", "model": "fake"}
+            raise AssertionError(capability)
+
+        plugin.ctx._rpc_call = rpc
+        await plugin.handle_stock(
+            stream_id="stream-1",
+            platform="qq",
+            user_id=user_id,
+            matched_groups={"rest": rest},
+        )
+        return sent
+
+    async def test_stranger_cannot_edit_pool(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plugin = build_plugin(Path(tmp))
+            sent = await self._dispatch(plugin, "加 600519 贵州茅台", user_id=STRANGER_USER)
+            self.assertTrue(any("只有主人" in text for text in sent))
+            self.assertNotIn("600519", {item.code for item in plugin._watchlist.all()})
+
+    async def test_owner_can_edit_pool(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plugin = build_plugin(Path(tmp))
+            sent = await self._dispatch(plugin, "加 600519 贵州茅台", user_id=OWNER_USER)
+            self.assertIn("600519", {item.code for item in plugin._watchlist.all()})
+            self.assertTrue(any("加进池子" in text for text in sent))
+
+    async def test_rate_command_updates_next_check(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plugin = build_plugin(Path(tmp))
+            before = plugin._state.load().next_check_at
+            sent = await self._dispatch(plugin, "节奏 15", user_id=OWNER_USER)
+            after = plugin._state.load().next_check_at
+            self.assertGreater(after, before)
+            self.assertTrue(any("15 分钟" in text for text in sent))
+
+    async def test_stranger_cannot_change_rate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plugin = build_plugin(Path(tmp))
+            sent = await self._dispatch(plugin, "节奏 15", user_id=STRANGER_USER)
+            self.assertTrue(any("只有主人" in text for text in sent))
+
+    async def test_quote_by_code_and_name(self) -> None:
+        """三种写法都应该查到同一只票。"""
+
+        for rest in ("行情 601899", "紫金矿业", "601899 紫金矿业", "紫金矿业 601899"):
+            with tempfile.TemporaryDirectory() as tmp:
+                plugin = build_plugin(Path(tmp))
+                sent = await self._dispatch(plugin, rest, user_id=STRANGER_USER)
+                self.assertTrue(sent, f"{rest} 没有回复")
+                self.assertIn("601899", sent[0], f"{rest} 没查到 601899")
+
+    async def test_unknown_query_gives_hint(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plugin = build_plugin(Path(tmp))
+            sent = await self._dispatch(plugin, "不存在的股票", user_id=STRANGER_USER)
+            self.assertTrue(any("没认出" in text for text in sent))
+
+    async def test_history_and_orders_respond(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plugin = build_plugin(Path(tmp))
+            for rest in ("记录", "委托"):
+                sent = await self._dispatch(plugin, rest, user_id=STRANGER_USER)
+                self.assertTrue(sent, f"{rest} 没有回复")
+
+
 if __name__ == "__main__":
     unittest.main()

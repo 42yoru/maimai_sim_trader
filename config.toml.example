@@ -1,6 +1,6 @@
 [plugin]
 enabled = true
-config_version = "0.3.2"
+config_version = "0.4.0"
 
 [mx]
 # 东方财富妙想 API Key，mkt_v_ 开头；留空则读环境变量 MX_APIKEY
@@ -52,3 +52,6 @@ private_user_ids = ["1215349250"]
 private_enabled = false
 close_report_enabled = true
 close_report_after = "15:00"
+[owner]
+# 能改动股票池和看盘节奏的用户，格式 platform:user_id；查询类命令不受限
+owners = ["qq:1215349250"]

@@ -143,6 +143,24 @@ class WatchlistStore:
                 return item
         return None
 
+    def find_by_name(self, text: str) -> Optional[PoolItem]:
+        """按名字模糊查一只票。
+
+        先找完全相同的，再找包含关系的；包含关系命中多只时返回 None 要求用户写代码。
+        """
+
+        keyword = " ".join(str(text or "").split())
+        if not keyword:
+            return None
+        items = self.load()
+        exact = [item for item in items if item.name == keyword]
+        if len(exact) == 1:
+            return exact[0]
+        partial = [item for item in items if keyword in item.name or item.name in keyword]
+        if len(partial) == 1:
+            return partial[0]
+        return None
+
     def add(self, code: str, name: str, *, note: str = "") -> bool:
         """加一只票；已存在则返回 False。"""
 

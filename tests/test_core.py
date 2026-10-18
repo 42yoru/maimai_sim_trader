@@ -42,6 +42,7 @@ STATE = sys.modules[f"{MODULE_NAME}.state"]
 TRADING = sys.modules[f"{MODULE_NAME}.trading"]
 WATCHLIST = sys.modules[f"{MODULE_NAME}.watchlist"]
 POSITIONS = sys.modules[f"{MODULE_NAME}.positions"]
+QUERY_ARGS = sys.modules[f"{MODULE_NAME}.query_args"]
 
 DecisionParseError = DECISION.DecisionParseError
 parse_decision = DECISION.parse_decision
@@ -55,6 +56,65 @@ round_lots = TRADING.round_lots
 DEFAULT_POOL = WATCHLIST.DEFAULT_POOL
 WatchlistStore = WATCHLIST.WatchlistStore
 parse_holdings = POSITIONS.parse_holdings
+parse_stock_query = QUERY_ARGS.parse_stock_query
+parse_rate_argument = QUERY_ARGS.parse_rate_argument
+QueryParseError = QUERY_ARGS.QueryParseError
+
+
+class QueryArgsTests(unittest.TestCase):
+    """命令参数的宽松识别。"""
+
+    def test_code_only(self) -> None:
+        self.assertEqual(parse_stock_query("行情 600036"), ("600036", "行情"))
+
+    def test_name_only(self) -> None:
+        self.assertEqual(parse_stock_query("招商银行"), ("", "招商银行"))
+
+    def test_code_then_name(self) -> None:
+        self.assertEqual(parse_stock_query("600036 招商银行"), ("600036", "招商银行"))
+
+    def test_name_then_code(self) -> None:
+        self.assertEqual(parse_stock_query("招商银行 600036"), ("600036", "招商银行"))
+
+    def test_ignores_longer_numbers(self) -> None:
+        """7 位数不该被当成代码。"""
+
+        self.assertEqual(parse_stock_query("6000367"), ("", "6000367"))
+
+    def test_rate_argument(self) -> None:
+        self.assertEqual(parse_rate_argument("15"), 15)
+        self.assertEqual(parse_rate_argument("30分钟"), 30)
+        self.assertEqual(parse_rate_argument("0"), 0)
+        with self.assertRaises(QueryParseError):
+            parse_rate_argument("快点")
+        with self.assertRaises(QueryParseError):
+            parse_rate_argument("9999")
+
+
+class WatchlistNameTests(unittest.TestCase):
+    """按名字找票。"""
+
+    def test_exact_and_partial_match(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WatchlistStore(Path(tmp) / "watchlist.json")
+            store.load()
+            self.assertEqual(store.find_by_name("招商银行").code, "600036")
+            self.assertEqual(store.find_by_name("招商").code, "600036")
+
+    def test_unknown_name(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WatchlistStore(Path(tmp) / "watchlist.json")
+            store.load()
+            self.assertIsNone(store.find_by_name("不存在的股票"))
+
+    def test_ambiguous_partial(self) -> None:
+        """部分匹配命中多只时返回 None，让用户写代码。"""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WatchlistStore(Path(tmp) / "watchlist.json")
+            store.load()
+            store.add("600519", "贵州茅台")
+            self.assertIsNone(store.find_by_name("中"))
 
 
 class TradingTests(unittest.TestCase):

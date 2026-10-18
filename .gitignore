@@ -15,3 +15,5 @@ logs/
 
 # MaiBot 保存插件配置时生成的备份（含密钥），绝不提交
 config_back/
+# 提交时临时用的消息文件
+.commit_msg.txt

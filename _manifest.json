@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "id": "github.42yoru.maimai-sim-trader",
-  "version": "0.3.2",
+  "version": "0.4.0",
   "name": "麦麦模拟盘",
   "description": "让麦麦用自己的判断自动炒一个东方财富妙想模拟组合：妙想负责账户与深度数据，腾讯快照负责盘中报价，她自己决定买卖什么、多久看一次盘，并按自己的语气在指定群或私聊汇报盈亏。纯插件实现，不改主程序。",
   "author": {

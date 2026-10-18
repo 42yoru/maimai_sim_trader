@@ -19,6 +19,7 @@ from maibot_sdk import Command, Field, MaiBotPlugin, PluginConfigBase, Tool
 from .decision import Decision, build_messages, parse_decision
 from .mx_client import DEFAULT_BASE_URL, MxApiError, MxClient
 from .positions import Holding, find_holding, parse_holdings
+from .query_args import QueryParseError, parse_rate_argument, parse_stock_query
 from .quotes import Quote, TencentQuoteClient
 from .report import build_plain_fallback, build_report_messages, build_snapshot_lines
 from .state import RuntimeState, StateStore
@@ -42,7 +43,7 @@ class PluginSectionConfig(PluginConfigBase):
     __ui_order__ = 0
 
     enabled: bool = Field(default=True, description="是否启用插件")
-    config_version: str = Field(default="0.3.2", description="配置版本")
+    config_version: str = Field(default="0.4.0", description="配置版本")
 
 
 class MxSectionConfig(PluginConfigBase):
@@ -122,6 +123,19 @@ class NotifySectionConfig(PluginConfigBase):
     close_report_after: str = Field(default="15:00", description="几点之后允许发收盘复盘")
 
 
+class OwnerSectionConfig(PluginConfigBase):
+    """主人白名单。"""
+
+    __ui_label__ = "主人"
+    __ui_icon__ = "user-check"
+    __ui_order__ = 6
+
+    owners: List[str] = Field(
+        default_factory=lambda: ["qq:1215349250"],
+        description="能改动股票池和看盘节奏的用户，格式 platform:user_id；查询类命令不受限",
+    )
+
+
 class SimTraderConfig(PluginConfigBase):
     """插件总配置。"""
 
@@ -131,6 +145,7 @@ class SimTraderConfig(PluginConfigBase):
     schedule: ScheduleSectionConfig = Field(default_factory=ScheduleSectionConfig)
     model: ModelSectionConfig = Field(default_factory=ModelSectionConfig)
     notify: NotifySectionConfig = Field(default_factory=NotifySectionConfig)
+    owner: OwnerSectionConfig = Field(default_factory=OwnerSectionConfig)
 
 
 # ──── 时间与时段 ────
@@ -741,31 +756,111 @@ class SimTraderPlugin(MaiBotPlugin):
 
     @Command(
         "stock",
-        description="模拟盘：查看账户、股票池，或增删池子里的票",
+        description="模拟盘：查账户、池子、委托、最近记录，查单只票行情，或增删池子与调整看盘节奏",
         pattern=r"(?s)^/(?:股|stock)(?![0-9A-Za-z_])(?P<rest>.*)$",
     )
     async def handle_stock(self, **kwargs: Any) -> Tuple[bool, Optional[str], bool]:
         """处理 /股 系列命令。"""
 
         context = self._invocation_context(kwargs)
+        stream_id = context["stream_id"]
         rest = str((kwargs.get("matched_groups") or {}).get("rest") or "").strip()
+
         if not rest or rest in {"状态", "status", "账户"}:
-            await self._send_status(context["stream_id"])
+            await self._send_status(stream_id)
             return True, None, True
         if rest in {"池", "池子", "pool"}:
-            await self._send_pool(context["stream_id"])
+            await self._send_pool(stream_id)
+            return True, None, True
+        if rest in {"委托", "委托单", "挂单", "orders"}:
+            await self._send_orders(stream_id)
+            return True, None, True
+        if rest in {"记录", "复盘", "history", "log"}:
+            await self._send_history(stream_id)
             return True, None, True
         if rest in {"试跑", "dry", "演练"}:
-            await self._handle_dry_run(context["stream_id"])
+            await self._handle_dry_run(stream_id)
             return True, None, True
+        if rest in {"行情", "quote", "价"}:
+            await self._send(stream_id, "用法：/股 行情 600036，或者直接 /股 招商银行")
+            return False, None, True
+
+        # 下面三条会改动状态，只认主人
         if rest.startswith(("加 ", "add ")):
-            await self._handle_pool_edit(context["stream_id"], rest.split(" ", 1)[1], add=True)
+            if not self._is_owner(context):
+                await self._send(stream_id, "这个操作只有主人能做。")
+                return False, None, True
+            await self._handle_pool_edit(stream_id, rest.split(" ", 1)[1], add=True)
             return True, None, True
         if rest.startswith(("减 ", "删 ", "remove ", "del ")):
-            await self._handle_pool_edit(context["stream_id"], rest.split(" ", 1)[1], add=False)
+            if not self._is_owner(context):
+                await self._send(stream_id, "这个操作只有主人能做。")
+                return False, None, True
+            await self._handle_pool_edit(stream_id, rest.split(" ", 1)[1], add=False)
             return True, None, True
-        await self._send(context["stream_id"], "用法：/股 状态｜/股 池｜/股 加 600519 贵州茅台｜/股 减 600519")
-        return False, None, True
+        if rest.startswith(("节奏 ", "rate ")):
+            if not self._is_owner(context):
+                await self._send(stream_id, "这个操作只有主人能做。")
+                return False, None, True
+            await self._handle_rate(stream_id, rest.split(" ", 1)[1])
+            return True, None, True
+
+        # 兜底：当成单只票的行情查询，宽松识别代码/名字
+        await self._handle_quote(stream_id, rest)
+        return True, None, True
+
+    def _is_owner(self, context: Dict[str, str]) -> bool:
+        """判断调用者是否在主人白名单里。"""
+
+        platform = context["platform"]
+        user_id = context["user_id"]
+        if not platform or not user_id:
+            return False
+        identity = f"{platform}:{user_id}"
+        allowed = {item.strip() for item in self.config.owner.owners if item.strip()}
+        return identity in allowed
+
+    async def _handle_quote(self, stream_id: str, rest: str) -> None:
+        """宽松查询单只票：代码、名字、或者两个一起写都认。"""
+
+        code, name = parse_stock_query(rest)
+        watchlist = self._require_watchlist()
+        if not code and name:
+            matched = watchlist.find_by_name(name)
+            if matched is not None:
+                code = matched.code
+        if not code:
+            await self._send(
+                stream_id,
+                f"没认出「{rest}」是哪只票。\n写六位代码最稳（/股 600036），"
+                "写池子里的名字也行（/股 池 可以先看有哪些）。",
+            )
+            return
+
+        try:
+            quotes = await self._require_quotes().fetch([code])
+        except Exception as exc:
+            await self._send(stream_id, f"查行情失败：{exc}")
+            return
+        quote = quotes.get(code)
+        if quote is None:
+            await self._send(stream_id, f"{code} 没拿到行情，可能代码不对或者停牌了。")
+            return
+
+        lines = [quote.to_brief()]
+        item = watchlist.get(code)
+        lines.append(f"池子里有它（{item.name}）" if item is not None else "不在股票池里")
+        try:
+            holdings = parse_holdings(await self._require_mx().get_positions())
+        except Exception as exc:
+            self.ctx.logger.warning("查行情时读持仓失败：%s", exc)
+            holdings = {}
+        position = holdings.get(code)
+        if position is not None:
+            lines.append(
+                f"持仓 {position.quantity}股 成本 {position.avg_cost:.2f} 浮盈 {position.profit:,.2f} 元"
+            )
+        await self._send(stream_id, "\n".join(lines))
 
     async def _send_status(self, stream_id: str) -> None:
         """回一条账户现状。"""
@@ -790,6 +885,63 @@ class SimTraderPlugin(MaiBotPlugin):
         lines = [f"股票池（{len(items)} 只）："]
         lines.extend(f"{item.code} {item.name}" for item in items)
         await self._send(stream_id, "\n".join(lines))
+
+    async def _send_orders(self, stream_id: str) -> None:
+        """回一条当日委托。"""
+
+        try:
+            orders = await self._require_mx().get_orders()
+        except Exception as exc:
+            await self._send(stream_id, f"读委托失败：{exc}")
+            return
+        if not orders:
+            await self._send(stream_id, "今天还没有委托。")
+            return
+        lines = [f"当日委托（{len(orders)} 条）："]
+        for row in orders:
+            code = row.get("stockCode") or row.get("code") or ""
+            name = row.get("stockName") or row.get("name") or ""
+            direction = row.get("direction") or row.get("orderDrt") or ""
+            quantity = row.get("quantity") or row.get("orderQty") or ""
+            price = row.get("price") or row.get("orderPrice") or ""
+            status = row.get("status") or row.get("orderStatus") or ""
+            lines.append(f"{code} {name} {direction} {quantity}股 @{price} 状态{status}")
+        await self._send(stream_id, "\n".join(lines))
+
+    async def _send_history(self, stream_id: str) -> None:
+        """回一条最近几轮的判断记录。"""
+
+        state = self._require_state().load()
+        lines = [f"今天看了 {state.check_count} 轮，动了 {state.trade_count} 笔"]
+        if state.last_mood:
+            lines.append(f"最近心情：{state.last_mood}")
+        if state.last_reasoning:
+            lines.append(f"最近判断：{state.last_reasoning}")
+        if state.empty_since:
+            lines.append(f"从 {state.empty_since} 起一直空仓")
+        if state.recent_notes:
+            lines.append("最近几轮：")
+            lines.extend(f"· {note}" for note in state.recent_notes[-6:])
+        else:
+            lines.append("还没有记录，等她跑过一轮再来看。")
+        await self._send(stream_id, "\n".join(lines))
+
+    async def _handle_rate(self, stream_id: str, argument: str) -> None:
+        """调整下次看盘间隔；0 表示下一分钟就看一次。"""
+
+        try:
+            minutes = parse_rate_argument(argument)
+        except QueryParseError as exc:
+            await self._send(stream_id, str(exc))
+            return
+        store = self._require_state()
+        state = store.load()
+        state.next_check_at = time.time() + minutes * 60
+        store.save()
+        if minutes == 0:
+            await self._send(stream_id, "好，下一分钟就去看一眼。")
+        else:
+            await self._send(stream_id, f"好，{minutes} 分钟后再看一眼。")
 
     async def _handle_dry_run(self, stream_id: str) -> None:
         """立刻跑一轮决策，但不下单、不播报、不写状态。"""
