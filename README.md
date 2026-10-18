@@ -1,6 +1,7 @@
 # 麦麦模拟盘
 
 <p>
+  <a href="https://github.com/42yoru/maimai_sim_trader/actions/workflows/ci.yml"><img src="https://github.com/42yoru/maimai_sim_trader/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License"></a>
   <a href="https://github.com/Mai-with-u/MaiBot"><img src="https://img.shields.io/badge/MaiBot-1.3.9%2B-orange.svg" alt="MaiBot"></a>
   <a href="https://github.com/Mai-with-u/maibot-plugin-sdk"><img src="https://img.shields.io/badge/SDK-2.14.0%2B-green.svg" alt="SDK"></a>
