@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install httpx ruff
+          # maibot-sdk 没有发布到 PyPI，从官方仓库装
+          pip install "maibot-sdk @ git+https://github.com/Mai-with-u/maibot-plugin-sdk.git"
+
+      - name: Lint
+        run: ruff check . --select E,F,W,B --line-length 130
+
+      - name: Unit tests
+        run: python -m unittest discover -s tests -t . -v

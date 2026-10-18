@@ -1,13 +1,28 @@
-# 麦麦模拟盘 (maimai.sim-trader)
+# 麦麦模拟盘
 
-让麦麦用自己的判断去炒一个东财妙想模拟组合，然后在指定群/私聊里汇报盈亏。
+<p>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License"></a>
+  <a href="https://github.com/Mai-with-u/MaiBot"><img src="https://img.shields.io/badge/MaiBot-1.3.9%2B-orange.svg" alt="MaiBot"></a>
+  <a href="https://github.com/Mai-with-u/maibot-plugin-sdk"><img src="https://img.shields.io/badge/SDK-2.14.0%2B-green.svg" alt="SDK"></a>
+  <img src="https://img.shields.io/badge/python-3.10%2B-blue.svg" alt="Python">
+</p>
 
-- **账户与深度数据**：东方财富妙想 API（`mockTrading` 模拟组合 + `query` / `screen` 自然语言数据）
+让麦麦用自己的判断去炒一个东方财富妙想模拟组合，然后在指定群或私聊里汇报盈亏。
+
+- **账户与深度数据**：妙想 API（`mockTrading` 模拟组合 + `query` / `screen` 自然语言数据）
 - **盘中报价**：腾讯行情快照（批量、免额度、快）
 - **决策**：她自己的模型——买什么、买多少、多久看一次盘，都由她定
 - **纪律**：价格换算、整手、仓位上限、现金底线、当日下单笔数上限写死在代码里
+- **人设**：不写死任何角色，直接用宿主自己的昵称与人格
 
 纯插件实现，不改主程序。
+
+> 只做**模拟盘**。插件不接任何真实券商通道，亏赚都是虚拟的。
+
+## 目录
+
+- [她怎么工作](#她怎么工作) · [安装](#安装) · [配置](#配置) · [命令](#命令)
+- [实际效果](#实际效果) · [常见问题](#常见问题) · [文件结构](#文件结构) · [已知边界](#已知边界)
 
 ## 她怎么工作
 
@@ -136,6 +151,44 @@ python scripts/preflight.py
 一次确认四件事：妙想 key 还有效、组合能读、池子里每只票都拿得到价、播报群在 MaiBot 数据库里唯一。
 任何一项失败会返回非零退出码并说明原因；全程不打印密钥。
 
+## 常见问题
+
+**`404 请先绑定账户~`**
+妙想账号里还没有把 API Key 绑定到模拟组合。去 [妙想 Skills 页面](https://dl.dfcfs.com/m/itc4) 找到「妙想模拟组合管理」，在「绑定组合名称」里填上组合名，点绑定。绑完再跑 `python scripts/preflight.py` 验证。
+
+**试跑报「模型只输出了思考过程没有正文」**
+决策模型的 `max_tokens` 太小，思考阶段就把额度用光了。把 `[model] max_tokens` 调大（默认 2400，思考型模型建议 3000+）。
+
+**群里收不到播报**
+依次检查：`[notify] group_enabled` 是否为 true、`group_ids` 里的群号是否正确、`account_id` 留空是否匹配到了多个账号。日志里会有 `找不到群 xxx 的聊天流` 或 `命中 N 条聊天流` 的提示。
+
+**她好几天都不交易**
+这是设计允许的——规则里写明「没机会就不动」。用 `/股 记录` 看她最近几轮的判断，`/股 节奏 15` 可以让她更勤快地看盘。
+
+**播报语气不像我的 bot**
+插件从宿主读 `bot.nickname` 和 `personality.personality`。如果宿主没配人设，会退回通用称呼并在日志里警告。
+
+## 文件结构
+
+```
+maimai_sim_trader/
+├── plugin.py           # 插件入口：配置模型、后台循环、命令、工具
+├── mx_client.py        # 妙想 HTTP 客户端（账户 / 委托 / 下单 / 查询 / 选股）
+├── quotes.py           # 腾讯行情快照，批量拉价并解析
+├── positions.py        # 持仓字段适配（字段名有变体，认不出代码就报错）
+├── trading.py          # 限价换算、整手、仓位与现金约束
+├── decision.py         # 决策 prompt 与严格 JSON 校验
+├── report.py           # 播报文案（语气归模型，数字归代码）
+├── watchlist.py        # 股票池，原子写
+├── state.py            # 运行状态：节奏、计数、最近记录
+├── query_args.py       # 命令参数的宽松识别
+├── fmt.py              # 金额 / 百分比 / 盈亏格式化
+├── scripts/preflight.py# 开盘前自检
+├── tests/              # 单测，不碰网络
+├── config.toml.example
+└── _manifest.json
+```
+
 ## 已知边界
 
 - 妙想**不支持市价单**；深市 ETF（`159` 开头）不支持。
@@ -151,4 +204,19 @@ cd plugins/maimai_sim_trader
 python -m unittest discover -s tests -t .
 ```
 
-单测不碰网络，只验限价换算、整手、资金/仓位约束、决策解析、池子增删与状态落盘。
+单测不碰网络，只验限价换算、整手、资金/仓位约束、决策解析、池子增删、持仓字段适配、命令参数识别、主人校验和整轮流程编排。
+
+## 贡献
+
+欢迎提 Issue 和 PR。提交前请确保：
+
+```bash
+ruff check . --select E,F,W,B --line-length 130
+python -m unittest discover -s tests -t .
+```
+
+都通过。带密钥的 `config.toml`、`config_back/` 和 `data/` 已在 `.gitignore` 里，别提交上去。
+
+## 许可证
+
+[MIT](LICENSE)

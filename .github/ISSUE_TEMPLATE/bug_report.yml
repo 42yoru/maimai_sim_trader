@@ -1,0 +1,53 @@
+name: Bug 报告
+description: 插件行为不符合预期时提这个
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        提之前先看一下 README 的「常见问题」，那里覆盖了绑定失败、模型空输出、收不到播报这几种情况。
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: 发生了什么
+      description: 现象，加上日志里的报错。**贴之前请抹掉 API Key**
+      placeholder: 发 /股 试跑 后回复「试跑失败了：……」
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: 你期望的结果
+    validations:
+      required: true
+
+  - type: input
+    id: plugin-version
+    attributes:
+      label: 插件版本
+      placeholder: "0.4.0"
+    validations:
+      required: true
+
+  - type: input
+    id: host-version
+    attributes:
+      label: MaiBot 与 SDK 版本
+      placeholder: "MaiBot 1.3.9 / SDK 2.14.0"
+
+  - type: textarea
+    id: config
+    attributes:
+      label: 相关配置
+      description: 贴 `config.toml` 里有关的段落即可。**务必删掉 `api_key`**
+      render: toml
+
+  - type: checkboxes
+    id: confirm
+    attributes:
+      label: 确认
+      options:
+        - label: 我已在本地跑过 `python -m unittest discover -s tests -t .`，问题不在改动过的代码里
+        - label: 我确认没有把 API Key 贴进这个 Issue

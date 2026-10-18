@@ -1,0 +1,9 @@
+blank_issues_enabled: false
+
+contact_links:
+  - name: MaiBot 插件开发文档
+    url: https://docs.mai-mai.org/develop/plugin-dev/
+    about: 插件加载、能力声明、配置模型这些基础问题先看官方文档
+  - name: 东方财富妙想
+    url: https://dl.dfcfs.com/m/mxclaw
+    about: 妙想 API Key、模拟组合绑定相关问题
