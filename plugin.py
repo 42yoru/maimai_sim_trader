@@ -15,6 +15,7 @@ import os
 import time
 
 from maibot_sdk import Command, Field, MaiBotPlugin, PluginConfigBase, Tool
+from maibot_sdk.types import ToolParameterInfo, ToolParamType
 
 from .decision import Decision, build_messages, parse_decision
 from .mx_client import DEFAULT_BASE_URL, MxApiError, MxClient
@@ -43,7 +44,7 @@ class PluginSectionConfig(PluginConfigBase):
     __ui_order__ = 0
 
     enabled: bool = Field(default=True, description="是否启用插件")
-    config_version: str = Field(default="0.4.3", description="配置版本")
+    config_version: str = Field(default="0.5.0", description="配置版本")
 
 
 class MxSectionConfig(PluginConfigBase):
@@ -384,10 +385,11 @@ class SimTraderPlugin(MaiBotPlugin):
 
     # ──── 一轮决策 ────
 
-    async def _run_round(self, now: datetime, today: str, *, dry_run: bool = False) -> List[str]:
+    async def _run_round(self, now: datetime, today: str, *, dry_run: bool = False, announce: bool = True) -> List[str]:
         """完整的一轮：拉数据 → 决策 → 执行 → 播报。
 
         dry_run=True 时只走到决策和测算：不下单、不写状态、不播报。
+        announce=False 时照常下单，但不往群里播报（供聊天里的工具调用使用）。
         """
 
         self._busy = True
@@ -445,7 +447,7 @@ class SimTraderPlugin(MaiBotPlugin):
             state.next_check_at = time.time() + interval * 60
             store.save()
 
-            if executed > 0 or decision.speech.strip():
+            if announce and (executed > 0 or decision.speech.strip()):
                 await self._broadcast(
                     decision=decision,
                     snapshot_lines=snapshot_lines,
@@ -875,7 +877,7 @@ class SimTraderPlugin(MaiBotPlugin):
         allowed = {item.strip() for item in self.config.owner.owners if item.strip()}
         return identity in allowed
 
-    async def _handle_quote(self, stream_id: str, rest: str) -> None:
+    async def _build_quote_text(self, rest: str) -> str:
         """宽松查询单只票：代码、名字、或者两个一起写都认。"""
 
         code, name = parse_stock_query(rest)
@@ -885,22 +887,18 @@ class SimTraderPlugin(MaiBotPlugin):
             if matched is not None:
                 code = matched.code
         if not code:
-            await self._send(
-                stream_id,
+            return (
                 f"没认出「{rest}」是哪只票。\n写六位代码最稳（/股 600036），"
-                "写池子里的名字也行（/股 池 可以先看有哪些）。",
+                "写池子里的名字也行（/股 池 可以先看有哪些）。"
             )
-            return
 
         try:
             quotes = await self._require_quotes().fetch([code])
         except Exception as exc:
-            await self._send(stream_id, f"查行情失败：{exc}")
-            return
+            return f"查行情失败：{exc}"
         quote = quotes.get(code)
         if quote is None:
-            await self._send(stream_id, f"{code} 没拿到行情，可能代码不对或者停牌了。")
-            return
+            return f"{code} 没拿到行情，可能代码不对或者停牌了。"
 
         lines = [quote.to_brief()]
         item = watchlist.get(code)
@@ -915,56 +913,71 @@ class SimTraderPlugin(MaiBotPlugin):
             lines.append(
                 f"持仓 {position.quantity}股 成本 {position.avg_cost:.2f} 浮盈 {position.profit:,.2f} 元"
             )
-        await self._send(stream_id, "\n".join(lines))
+        return "\n".join(lines)
 
-    async def _send_status(self, stream_id: str) -> None:
-        """回一条账户现状。"""
+    async def _handle_quote(self, stream_id: str, rest: str) -> None:
+        """命令通道的行情查询。"""
+
+        await self._send(stream_id, await self._build_quote_text(rest))
+
+    async def _build_status_text(self) -> str:
+        """账户现状。"""
 
         try:
             mx = self._require_mx()
             balance = await mx.get_balance()
             holdings = parse_holdings(await mx.get_positions())
         except Exception as exc:
-            await self._send(stream_id, f"读账户失败：{exc}")
-            return
-        lines = build_snapshot_lines(balance, list(holdings.values()))
-        await self._send(stream_id, "\n".join(lines))
+            return f"读账户失败：{exc}"
+        return "\n".join(build_snapshot_lines(balance, list(holdings.values())))
+
+    async def _send_status(self, stream_id: str) -> None:
+        """回一条账户现状。"""
+
+        await self._send(stream_id, await self._build_status_text())
+
+    def _build_pool_text(self) -> str:
+        """股票池清单。"""
+
+        items = self._require_watchlist().all()
+        if not items:
+            return "池子是空的。"
+        lines = [f"股票池（{len(items)} 只）："]
+        lines.extend(f"{item.code} {item.name}" for item in items)
+        return "\n".join(lines)
 
     async def _send_pool(self, stream_id: str) -> None:
         """回一条股票池清单。"""
 
-        items = self._require_watchlist().all()
-        if not items:
-            await self._send(stream_id, "池子是空的。")
-            return
-        lines = [f"股票池（{len(items)} 只）："]
-        lines.extend(f"{item.code} {item.name}" for item in items)
-        await self._send(stream_id, "\n".join(lines))
+        await self._send(stream_id, self._build_pool_text())
 
-    async def _send_orders(self, stream_id: str) -> None:
-        """回一条当日委托。"""
+    async def _build_orders_text(self) -> str:
+        """当日委托。"""
 
         try:
             orders = await self._require_mx().get_orders()
         except Exception as exc:
-            await self._send(stream_id, f"读委托失败：{exc}")
-            return
+            return f"读委托失败：{exc}"
         if not orders:
-            await self._send(stream_id, "今天还没有委托。")
-            return
+            return "今天还没有委托。"
         lines = [f"当日委托（{len(orders)} 条）："]
         for row in orders:
-            code = row.get("stockCode") or row.get("code") or ""
-            name = row.get("stockName") or row.get("name") or ""
+            code = row.get("secCode") or row.get("stockCode") or row.get("code") or ""
+            name = row.get("secName") or row.get("stockName") or row.get("name") or ""
             direction = row.get("direction") or row.get("orderDrt") or ""
             quantity = row.get("quantity") or row.get("orderQty") or ""
             price = row.get("price") or row.get("orderPrice") or ""
             status = row.get("status") or row.get("orderStatus") or ""
             lines.append(f"{code} {name} {direction} {quantity}股 @{price} 状态{status}")
-        await self._send(stream_id, "\n".join(lines))
+        return "\n".join(lines)
 
-    async def _send_history(self, stream_id: str) -> None:
-        """回一条最近几轮的判断记录。"""
+    async def _send_orders(self, stream_id: str) -> None:
+        """回一条当日委托。"""
+
+        await self._send(stream_id, await self._build_orders_text())
+
+    def _build_history_text(self) -> str:
+        """最近几轮的判断记录。"""
 
         state = self._require_state().load()
         lines = [f"今天看了 {state.check_count} 轮，动了 {state.trade_count} 笔"]
@@ -979,7 +992,12 @@ class SimTraderPlugin(MaiBotPlugin):
             lines.extend(f"· {note}" for note in state.recent_notes[-6:])
         else:
             lines.append("还没有记录，等她跑过一轮再来看。")
-        await self._send(stream_id, "\n".join(lines))
+        return "\n".join(lines)
+
+    async def _send_history(self, stream_id: str) -> None:
+        """回一条最近几轮的判断记录。"""
+
+        await self._send(stream_id, self._build_history_text())
 
     async def _handle_rate(self, stream_id: str, argument: str) -> None:
         """调整下次看盘间隔；0 表示下一分钟就看一次。"""
@@ -1038,22 +1056,82 @@ class SimTraderPlugin(MaiBotPlugin):
     # ──── 工具 ────
 
     @Tool(
-        "stock_account_summary",
-        description="查看模拟盘账户的资产、持仓和盈亏",
-        parameters=[],
-        chat_scope="private",
+        "sim_trader_query",
+        description="查模拟盘：账户、股票池、当日委托、最近判断、单只票行情",
+        parameters=[
+            ToolParameterInfo(
+                name="action",
+                param_type=ToolParamType.STRING,
+                description="查什么：status=账户，pool=股票池，orders=当日委托，history=最近几轮的判断，quote=单只票行情",
+                enum_values=["status", "pool", "orders", "history", "quote"],
+            ),
+            ToolParameterInfo(
+                name="query",
+                param_type=ToolParamType.STRING,
+                description="action=quote 时填股票代码或名字（例如 600036 或 招商银行），其他 action 留空",
+                required=False,
+            ),
+        ],
     )
-    async def tool_account_summary(self, **kwargs: Any) -> Dict[str, Any]:
-        """给她在聊天里回答"我们最近炒得怎么样"。"""
+    async def tool_query(self, action: str = "", query: str = "", **kwargs: Any) -> Dict[str, Any]:
+        """聊天里查模拟盘的各种状态。"""
 
         del kwargs
+        normalized = action.strip().lower()
         try:
-            mx = self._require_mx()
-            balance = await mx.get_balance()
-            holdings = parse_holdings(await mx.get_positions())
+            if normalized == "status":
+                return {"success": True, "content": await self._build_status_text()}
+            if normalized == "pool":
+                return {"success": True, "content": self._build_pool_text()}
+            if normalized == "orders":
+                return {"success": True, "content": await self._build_orders_text()}
+            if normalized == "history":
+                return {"success": True, "content": self._build_history_text()}
+            if normalized == "quote":
+                if not query.strip():
+                    return {"success": False, "content": "查行情要给个股票代码或名字。"}
+                return {"success": True, "content": await self._build_quote_text(query)}
         except Exception as exc:
-            return {"success": False, "content": f"查不到账户：{exc}"}
-        return {"success": True, "content": "\n".join(build_snapshot_lines(balance, list(holdings.values())))}
+            return {"success": False, "content": f"查询失败：{exc}"}
+        return {
+            "success": False,
+            "content": f"不认识的 action：{action!r}，只能是 status / pool / orders / history / quote。",
+        }
+
+    @Tool(
+        "sim_trader_review",
+        description="让模拟盘此刻重新看一次盘并自行决定买不买、卖不卖",
+        parameters=[
+            ToolParameterInfo(
+                name="reason",
+                param_type=ToolParamType.STRING,
+                description="为什么现在想看盘，例如「群里有人怂恿加仓」；只作为参考，写不写都行",
+                required=False,
+            ),
+        ],
+    )
+    async def tool_review(self, reason: str = "", **kwargs: Any) -> Dict[str, Any]:
+        """主动看盘：跑一轮完整决策（会真实下单，但不额外播报）。"""
+
+        del kwargs
+        if self._busy:
+            return {"success": False, "content": "已经有一轮在看盘了，等它跑完再说。"}
+        now = datetime.now()
+        today = now.strftime("%Y-%m-%d")
+        if reason.strip():
+            self.ctx.logger.info("聊天里触发看盘，理由：%s", reason.strip()[:80])
+        try:
+            notes = await self._run_round(now, today, announce=False)
+        except Exception as exc:
+            self.ctx.logger.error("聊天里触发看盘失败", exc_info=True)
+            return {"success": False, "content": f"看盘失败了：{exc}"}
+        state = self._require_state().load()
+        summary = [f"心情：{state.last_mood or '平静'}", f"判断：{state.last_reasoning or '（没写）'}"]
+        if notes:
+            summary.extend(notes)
+        else:
+            summary.append("这轮什么都没做。")
+        return {"success": True, "content": "\n".join(summary)}
 
     # ──── 工具方法 ────
 

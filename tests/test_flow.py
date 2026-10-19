@@ -421,5 +421,59 @@ class CommandTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(sent, f"{rest} 没有回复")
 
 
+class ToolTests(unittest.IsolatedAsyncioTestCase):
+    """自然语言工具。"""
+
+    async def test_query_actions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plugin = build_plugin(Path(tmp))
+            for action in ("status", "pool", "orders", "history"):
+                result = await plugin.tool_query(action=action)
+                self.assertTrue(result["success"], f"{action} 失败: {result}")
+
+    async def test_query_quote_by_name(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plugin = build_plugin(Path(tmp))
+            result = await plugin.tool_query(action="quote", query="紫金矿业")
+            self.assertTrue(result["success"])
+            self.assertIn("601899", result["content"])
+
+    async def test_query_quote_needs_target(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plugin = build_plugin(Path(tmp))
+            result = await plugin.tool_query(action="quote")
+            self.assertFalse(result["success"])
+
+    async def test_query_unknown_action(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plugin = build_plugin(Path(tmp))
+            result = await plugin.tool_query(action="whatever")
+            self.assertFalse(result["success"])
+            self.assertIn("status", result["content"])
+
+    async def test_review_places_orders_without_broadcast(self) -> None:
+        """聊天里触发的看盘会真下单，但不额外往群里播报。"""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            plugin = build_plugin(Path(tmp))
+            sent: List[str] = []
+
+            async def rpc(method: str, plugin_id: str, payload: Dict[str, Any], timeout_ms: Optional[int] = None) -> Any:
+                capability = payload["capability"]
+                if capability == "send.text":
+                    sent.append(payload["args"]["text"])
+                    return {"success": True, "sent": True, "message_id": "m1"}
+                if capability == "llm.generate":
+                    return {"success": True, "response": DECISION_TEXT, "reasoning": "", "model": "fake"}
+                raise AssertionError(capability)
+
+            plugin.ctx._rpc_call = rpc
+            result = await plugin.tool_review(reason="群里有人怂恿加仓")
+            self.assertTrue(result["success"], result)
+            self.assertEqual(len(plugin._mx.placed), 2)
+            self.assertEqual(sent, [], "工具触发的看盘不该再发群播报")
+            self.assertIn("心情", result["content"])
+
+
 if __name__ == "__main__":
     unittest.main()
