@@ -43,7 +43,7 @@ class PluginSectionConfig(PluginConfigBase):
     __ui_order__ = 0
 
     enabled: bool = Field(default=True, description="是否启用插件")
-    config_version: str = Field(default="0.4.1", description="配置版本")
+    config_version: str = Field(default="0.4.2", description="配置版本")
 
 
 class MxSectionConfig(PluginConfigBase):
@@ -981,7 +981,7 @@ class SimTraderPlugin(MaiBotPlugin):
         state.next_check_at = time.time() + minutes * 60
         store.save()
         if minutes == 0:
-            await self._send(stream_id, "好，下一分钟就去看一眼。")
+            await self._send(stream_id, "好，下一分钟就去看一眼。跑完用 /股 记录 能看到她怎么想的。")
         else:
             await self._send(stream_id, f"好，{minutes} 分钟后再看一眼。")
 
