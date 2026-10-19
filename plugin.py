@@ -43,7 +43,7 @@ class PluginSectionConfig(PluginConfigBase):
     __ui_order__ = 0
 
     enabled: bool = Field(default=True, description="是否启用插件")
-    config_version: str = Field(default="0.4.2", description="配置版本")
+    config_version: str = Field(default="0.4.3", description="配置版本")
 
 
 class MxSectionConfig(PluginConfigBase):
@@ -103,7 +103,18 @@ class ModelSectionConfig(PluginConfigBase):
     report_task_name: str = Field(default="replyer", description="播报用的模型任务名，留空用宿主默认")
     report_model: str = Field(default="", description="播报用的具体模型名，留空跟随任务")
     temperature: float = Field(default=0.7, ge=0.0, le=2.0, description="决策温度")
-    max_tokens: int = Field(default=2400, ge=200, le=8000, description="决策输出上限；思考型模型要给足，否则正文会被挤空")
+    max_tokens: int = Field(
+        default=4000,
+        ge=200,
+        le=16000,
+        description="决策输出上限。推理模型（reasoning effort）思考也要占额度，给小了正文会是空的",
+    )
+    report_max_tokens: int = Field(
+        default=2000,
+        ge=200,
+        le=16000,
+        description="播报输出上限。同样要给推理模型留出思考空间",
+    )
     request_timeout_ms: int = Field(
         default=180000,
         ge=10000,
@@ -699,10 +710,12 @@ class SimTraderPlugin(MaiBotPlugin):
                 task_name=self.config.model.report_task_name,
                 model_name=self.config.model.report_model,
                 temperature=0.9,
-                max_tokens=500,
+                max_tokens=self.config.model.report_max_tokens,
             )
             if result.get("success"):
                 text = str(result.get("response") or "").strip()
+            else:
+                self.ctx.logger.warning("播报模型调用失败，改用纯文本: %s", result.get("error") or result)
         except Exception:
             self.ctx.logger.error("生成播报文案失败，改用纯文本", exc_info=True)
         if not text:
