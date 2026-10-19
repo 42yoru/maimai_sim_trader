@@ -16,10 +16,11 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-CODE_KEYS = ("stockCode", "code", "secCode", "symbol")
-NAME_KEYS = ("stockName", "name", "secName", "shortName")
-QUANTITY_KEYS = ("quantity", "holdAmount", "stockQty", "holdQty", "count")
+CODE_KEYS = ("stockCode", "secCode", "code", "symbol")
+NAME_KEYS = ("stockName", "secName", "name", "shortName")
+QUANTITY_KEYS = ("quantity", "count", "holdAmount", "stockQty", "holdQty")
 AVAILABLE_KEYS = (
+    "availCount",
     "availableQuantity",
     "availableQty",
     "sellableQuantity",
@@ -29,9 +30,12 @@ AVAILABLE_KEYS = (
     "canSellQty",
 )
 COST_KEYS = ("avgCost", "costPrice", "averageCost", "cost")
-PRICE_KEYS = ("currentPrice", "lastPrice", "nowPrice", "price")
-VALUE_KEYS = ("marketValue", "marketVal", "holdMarketValue", "positionValue", "posValue")
+PRICE_KEYS = ("currentPrice", "price", "lastPrice", "nowPrice")
+VALUE_KEYS = ("value", "marketValue", "marketVal", "holdMarketValue", "positionValue", "posValue")
 PROFIT_KEYS = ("profit", "floatProfit", "profitLoss", "income", "dayProfit")
+# 妙想的价格/成本是「定点整数 + 小数位」，要按 *Dec 缩放成真实价格
+COST_DEC_KEYS = ("costPriceDec", "costDec")
+PRICE_DEC_KEYS = ("priceDec", "lastPriceDec")
 
 
 def _first_present(row: Dict[str, Any], keys: Iterable[str]) -> Any:
@@ -42,6 +46,25 @@ def _first_present(row: Dict[str, Any], keys: Iterable[str]) -> Any:
         if value not in (None, "", "--"):
             return value
     return None
+
+
+def _scaled_amount(row: Dict[str, Any], keys: Iterable[str], dec_keys: Iterable[str]) -> float:
+    """取定点数并按小数位缩放；没有 Dec 字段说明本来就是小数，原样返回。"""
+
+    raw = _first_present(row, keys)
+    if raw is None:
+        return 0.0
+    try:
+        number = float(raw)
+    except (TypeError, ValueError):
+        return 0.0
+    decimals = _first_present(row, dec_keys)
+    if decimals is None:
+        return number
+    try:
+        return number / (10 ** int(decimals))
+    except (TypeError, ValueError, OverflowError):
+        return number
 
 
 def _as_int(value: Any) -> int:
@@ -97,9 +120,18 @@ def parse_holdings(rows: Iterable[Dict[str, Any]]) -> Dict[str, Holding]:
         code = str(raw_code).strip()
         name = str(_first_present(row, NAME_KEYS) or code).strip()
         quantity = _as_int(_first_present(row, QUANTITY_KEYS))
-        available = _as_int(_first_present(row, AVAILABLE_KEYS))
-        avg_cost = _as_float(_first_present(row, COST_KEYS))
-        current_price = _as_float(_first_present(row, PRICE_KEYS))
+        raw_available = _first_present(row, AVAILABLE_KEYS)
+        available = _as_int(raw_available)
+        if quantity > 0 and raw_available is None:
+            # 字段完全缺失才值得警告；值为 0 是 T+1 的正常状态
+            logger.warning(
+                "持仓 %s 有 %d 股但找不到可卖数量字段，字段名可能变了（现有键：%s）",
+                code,
+                quantity,
+                sorted(row.keys()),
+            )
+        avg_cost = _scaled_amount(row, COST_KEYS, COST_DEC_KEYS)
+        current_price = _scaled_amount(row, PRICE_KEYS, PRICE_DEC_KEYS)
         market_value = _as_float(_first_present(row, VALUE_KEYS))
         profit = _as_float(_first_present(row, PROFIT_KEYS))
         if quantity > 0 and available <= 0:

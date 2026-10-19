@@ -43,7 +43,7 @@ class PluginSectionConfig(PluginConfigBase):
     __ui_order__ = 0
 
     enabled: bool = Field(default=True, description="是否启用插件")
-    config_version: str = Field(default="0.4.0", description="配置版本")
+    config_version: str = Field(default="0.4.1", description="配置版本")
 
 
 class MxSectionConfig(PluginConfigBase):
@@ -104,6 +104,12 @@ class ModelSectionConfig(PluginConfigBase):
     report_model: str = Field(default="", description="播报用的具体模型名，留空跟随任务")
     temperature: float = Field(default=0.7, ge=0.0, le=2.0, description="决策温度")
     max_tokens: int = Field(default=2400, ge=200, le=8000, description="决策输出上限；思考型模型要给足，否则正文会被挤空")
+    request_timeout_ms: int = Field(
+        default=180000,
+        ge=10000,
+        le=600000,
+        description="单次模型调用允许等待的毫秒数；宿主默认 30 秒，思考型模型经常不够",
+    )
 
 
 class NotifySectionConfig(PluginConfigBase):
@@ -422,6 +428,9 @@ class SimTraderPlugin(MaiBotPlugin):
                 reasoning=decision.reasoning,
                 trade_count=executed,
             )
+            if executed > 0:
+                # 这一轮建了仓，空仓起点要立刻清掉，别等到下一轮
+                state.track_position_state(has_position=True, today=today)
             state.next_check_at = time.time() + interval * 60
             store.save()
 
@@ -442,6 +451,39 @@ class SimTraderPlugin(MaiBotPlugin):
         if not codes:
             return {}
         return await self._require_quotes().fetch(codes)
+
+    async def _llm_generate(
+        self,
+        *,
+        messages: List[Dict[str, str]],
+        task_name: str,
+        model_name: str,
+        temperature: float,
+        max_tokens: int,
+    ) -> Dict[str, Any]:
+        """带超时的模型调用。
+
+        SDK 的 ``llm.generate`` 走宿主默认的 30 秒超时，思考型模型经常不够用
+        （日志里表现为 ``[E_TIMEOUT] 请求 cap.call 超时``）。这里直接走能力层，
+        把超时拉到配置值。
+        """
+
+        payload: Dict[str, Any] = {
+            "prompt": messages,
+            "model_name": model_name or "",
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+        }
+        if task_name:
+            payload["task_name"] = task_name
+        result = await self.ctx.call_capability(
+            "llm.generate",
+            timeout_ms=self.config.model.request_timeout_ms,
+            **payload,
+        )
+        if not isinstance(result, dict):
+            return {"success": False, "error": f"模型返回了非对象结果: {type(result).__name__}"}
+        return result
 
     async def _ask_model(
         self,
@@ -479,10 +521,10 @@ class SimTraderPlugin(MaiBotPlugin):
             bot_name=self._bot_name or DEFAULT_BOT_NAME,
             persona=self._bot_persona,
         )
-        result = await self.ctx.llm.generate(
-            messages,
-            task_name=self.config.model.decision_task_name or None,
-            model_name=self.config.model.decision_model or "",
+        result = await self._llm_generate(
+            messages=messages,
+            task_name=self.config.model.decision_task_name,
+            model_name=self.config.model.decision_model,
             temperature=self.config.model.temperature,
             max_tokens=self.config.model.max_tokens,
         )
@@ -652,10 +694,10 @@ class SimTraderPlugin(MaiBotPlugin):
                 mood=decision.mood,
                 reasoning=decision.reasoning,
             )
-            result = await self.ctx.llm.generate(
-                messages,
-                task_name=self.config.model.report_task_name or None,
-                model_name=self.config.model.report_model or "",
+            result = await self._llm_generate(
+                messages=messages,
+                task_name=self.config.model.report_task_name,
+                model_name=self.config.model.report_model,
                 temperature=0.9,
                 max_tokens=500,
             )

@@ -310,6 +310,36 @@ class HoldingTests(unittest.TestCase):
         holdings = parse_holdings([{"stockCode": "600036", "quantity": 500}])
         self.assertEqual(holdings["600036"].available, 0)
 
+    def test_mx_fixed_point_shape(self) -> None:
+        """妙想真实返回：定点整数 + 小数位，必须缩放成真实价格。"""
+
+        holdings = parse_holdings(
+            [
+                {
+                    "secCode": "000333",
+                    "secMkt": 0,
+                    "count": 1500,
+                    "availCount": 0,
+                    "value": 127980.0,
+                    "costPriceDec": 3,
+                    "costPrice": 85236,
+                    "priceDec": 2,
+                    "price": 8532,
+                    "profit": 125.998,
+                    "secName": "美的集团",
+                    "posPct": 12.8,
+                }
+            ]
+        )
+        holding = holdings["000333"]
+        self.assertEqual(holding.name, "美的集团")
+        self.assertEqual(holding.quantity, 1500)
+        self.assertEqual(holding.available, 0)
+        self.assertAlmostEqual(holding.avg_cost, 85.236, places=3)
+        self.assertAlmostEqual(holding.current_price, 85.32, places=2)
+        self.assertAlmostEqual(holding.market_value, 127980.0)
+        self.assertAlmostEqual(holding.profit, 125.998, places=3)
+
 
 class StateTests(unittest.TestCase):
     """状态落盘与跨日重置。"""
