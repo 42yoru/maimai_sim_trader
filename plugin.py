@@ -44,7 +44,7 @@ class PluginSectionConfig(PluginConfigBase):
     __ui_order__ = 0
 
     enabled: bool = Field(default=True, description="是否启用插件")
-    config_version: str = Field(default="0.5.0", description="配置版本")
+    config_version: str = Field(default="0.5.1", description="配置版本")
 
 
 class MxSectionConfig(PluginConfigBase):
@@ -66,7 +66,7 @@ class AccountSectionConfig(PluginConfigBase):
     __ui_icon__ = "shield-check"
     __ui_order__ = 2
 
-    label: str = Field(default="模拟组合9072966", description="妙想模拟组合名称，用于播报和日志")
+    label: str = Field(default="", description="账户显示名；留空则自动读妙想返回的组合名")
     slippage: float = Field(default=0.003, ge=0.0, le=0.02, description="限价单让价比例，0.003 即 0.3%")
     max_position_ratio: float = Field(default=0.2, ge=0.05, le=1.0, description="单票市值占总资产上限")
     min_cash_reserve_ratio: float = Field(default=0.2, ge=0.0, le=0.9, description="买入后至少保留的现金比例")
@@ -524,7 +524,7 @@ class SimTraderPlugin(MaiBotPlugin):
         ]
         messages = build_messages(
             now_text=now.strftime(TIME_FORMAT),
-            session_label=self.config.account.label,
+            session_label=self._account_label(balance),
             balance=balance,
             positions=positions,
             pool_lines=pool_lines,
@@ -664,6 +664,14 @@ class SimTraderPlugin(MaiBotPlugin):
 
         snapshot_lines = build_snapshot_lines(balance, list(positions.values()))
         return executed, notes, snapshot_lines
+
+    def _account_label(self, balance: Dict[str, Any]) -> str:
+        """账户显示名：配置优先，留空就用妙想返回的组合名。"""
+
+        configured = self.config.account.label.strip()
+        if configured:
+            return configured
+        return str(balance.get("accName") or "").strip() or "模拟盘"
 
     def _idle_note(self, state: RuntimeState, today: str) -> str:
         """空仓天数提示，塞进决策 prompt，防止她一直躺着不动。"""

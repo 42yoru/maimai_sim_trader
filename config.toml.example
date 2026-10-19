@@ -1,6 +1,6 @@
 [plugin]
 enabled = true
-config_version = "0.5.0"
+config_version = "0.5.1"
 
 [mx]
 # 东方财富妙想 API Key，mkt_v_ 开头；留空则读环境变量 MX_APIKEY
@@ -9,8 +9,8 @@ base_url = "https://mkapi2.dfcfs.com/finskillshub"
 timeout = 20.0
 
 [account]
-# 妙想里已绑定的模拟组合名称，仅用于播报与日志
-label = "模拟组合9072966"
+# 账户显示名，留空则自动读妙想返回的组合名
+label = ""
 # 限价单让价比例：买入往上让、卖出往下让，0.003 即 0.3%
 slippage = 0.003
 # 单票市值占总资产上限
