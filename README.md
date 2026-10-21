@@ -118,6 +118,8 @@ cp maimai_sim_trader/config.toml.example maimai_sim_trader/config.toml   # 可�
 
 **这两个工具都没有权限门槛**：`sim_trader_query` 只是读数据，`sim_trader_review` 会让它跑一整轮决策。交易时段内可能真的下模拟单，闭市时只算不做；同一聊天流两次手动看盘之间有冷却（`[schedule] manual_cooldown_seconds`，默认 60 秒），避免有人在群里反复刷、白烧模型的 token。
 
+> ⚠️ **换成真实账户之前，先给 `sim_trader_query` 加闸。** 现在 `status` / `orders` 不设门槛是合理的——账户是模拟盘、钱是假的、泄露面只有自己看得见的持仓。如果哪天把 `[mx]` 指向真实账户，请先把这两个 action 收进 `[owner] owners` 白名单，否则群里任何一句闲聊都可能让模型把账户和当日委托念出来。
+
 真下单仍然受 `max_trades_per_day`、单票上限、现金底线约束。
 
 ## 落盘
@@ -202,11 +204,15 @@ maimai_sim_trader/
 ├── state.py            # 运行状态：节奏、计数、最近记录
 ├── query_args.py       # 命令参数的宽松识别
 ├── fmt.py              # 金额 / 百分比 / 盈亏格式化
-├── scripts/preflight.py# 开盘前自检
+├── scripts/preflight.py# 开盘前自检（仅开发者本地用，不是运行时依赖）
 ├── tests/              # 单测，不碰网络
 ├── config.toml.example
 └── _manifest.json
 ```
+
+`scripts/` 下的东西只给开发者在本地排查用：`preflight.py` 会以只读方式打开宿主实例的
+`data/MaiBot.db` 查 `chat_sessions`，宿主库结构一变它就会失败——**插件运行时从不碰宿主数据库**，
+一律走 `chat.get_group_streams` 能力。别把 `scripts/` 当运行时依赖，也别在部署脚本里调它。
 
 ## 已知边界
 

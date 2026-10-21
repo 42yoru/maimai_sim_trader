@@ -1,5 +1,15 @@
 # 更新记录
 
+## 0.6.4
+
+**细节**
+
+- `config_version` 对齐到插件版本：0.6.2 那次加了 `manual_cooldown_seconds` 却没跟着滚，
+  之后两者一起走
+- README 补一句「`sim_trader_query` 的 `status` / `orders` 目前不设门槛，
+  将来若把 `[mx]` 指向真实账户，需要先把这两个 action 收进 `[owner] owners`」
+- README 文件结构标注 `scripts/` 仅开发者本地自检，不是运行时依赖
+
 ## 0.6.3
 
 **修复**
