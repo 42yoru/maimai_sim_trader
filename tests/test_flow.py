@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -480,6 +480,8 @@ class ToolTests(unittest.IsolatedAsyncioTestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             plugin = build_plugin(Path(tmp))
+            # 闭市时 review 会自动降级为试跑，这条要验"真下单"，所以把时段设成现在
+            plugin.config.schedule.sessions = _session_covering(datetime.now())
             sent: List[str] = []
 
             async def rpc(method: str, plugin_id: str, payload: Dict[str, Any], timeout_ms: Optional[int] = None) -> Any:
@@ -578,6 +580,84 @@ class StartupConfigTests(unittest.IsolatedAsyncioTestCase):
             joined = "\n".join(captured.output)
             self.assertIn("没有配置播报目标", joined)
             self.assertIn("owner.owners 为空", joined)
+
+
+def _session_covering(now: datetime) -> List[str]:
+    """给一个包含当前时刻的交易时段。"""
+
+    start = (now - timedelta(minutes=5)).strftime("%H:%M")
+    end = (now + timedelta(minutes=30)).strftime("%H:%M")
+    return [f"{start}-{end}"]
+
+
+def _session_far_from(now: datetime) -> List[str]:
+    """给一个肯定不含当前时刻的交易时段。"""
+
+    return ["00:00-00:01"] if now.hour >= 12 else ["23:00-23:01"]
+
+
+class ManualTriggerGateTests(unittest.IsolatedAsyncioTestCase):
+    """手动看盘的闸门：闭市降级为试跑、同一聊天流有冷却。"""
+
+    async def test_review_outside_session_does_not_place_orders(self) -> None:
+        """闭市时聊天里触发看盘：可以跑决策，但不能真下单。"""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            plugin = build_plugin(Path(tmp))
+            now = datetime.now()
+            plugin.config.schedule.sessions = _session_far_from(now)
+            plugin._quotes = _quotes_stamped_today()
+
+            result = await plugin.tool_review(reason="群里有人问")
+
+            self.assertTrue(result["success"], result)
+            self.assertIn("不在交易时段", result["content"])
+            self.assertEqual(len(plugin._mx.placed), 0)
+
+    async def test_review_inside_session_places_orders(self) -> None:
+        """交易时段内触发看盘：照常下单。"""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            plugin = build_plugin(Path(tmp))
+            plugin.config.schedule.sessions = _session_covering(datetime.now())
+            plugin._quotes = _quotes_stamped_today()
+
+            result = await plugin.tool_review(reason="开盘了")
+
+            self.assertTrue(result["success"], result)
+            self.assertNotIn("不在交易时段", result["content"])
+            self.assertEqual(len(plugin._mx.placed), 2)
+
+    async def test_review_respects_cooldown(self) -> None:
+        """同一聊天流连着触发：第二次被冷却挡下。"""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            plugin = build_plugin(Path(tmp))
+            plugin.config.schedule.sessions = _session_covering(datetime.now())
+            plugin._quotes = _quotes_stamped_today()
+
+            first = await plugin.tool_review(stream_id=GROUP_SESSION)
+            second = await plugin.tool_review(stream_id=GROUP_SESSION)
+
+            self.assertTrue(first["success"], first)
+            self.assertFalse(second["success"], second)
+            self.assertIn("秒后再来", second["content"])
+
+    async def test_dry_run_respects_cooldown(self) -> None:
+        """`/股 试跑` 与工具共用冷却，反复触发只会烧一次 token。"""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            plugin = build_plugin(Path(tmp))
+            harness = FakeHarness()
+            plugin.ctx._rpc_call = harness.rpc
+
+            await plugin._handle_dry_run(GROUP_SESSION)
+            await plugin._handle_dry_run(GROUP_SESSION)
+
+            texts = [item["text"] for item in harness.sent]
+            self.assertTrue(any("试跑结果" in text for text in texts), texts)
+            self.assertTrue(any("秒后再试" in text for text in texts), texts)
+            self.assertEqual(len(harness.llm_prompts), 1)
 
 
 if __name__ == "__main__":

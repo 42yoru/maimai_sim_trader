@@ -1,6 +1,6 @@
-[plugin]
+﻿[plugin]
 enabled = true
-config_version = "0.6.0"
+config_version = "0.6.2"
 
 [mx]
 # 东方财富妙想 API Key，mkt_v_ 开头；留空则读环境变量 MX_APIKEY
@@ -31,6 +31,8 @@ min_interval_minutes = 10
 max_interval_minutes = 240
 idle_sleep_seconds = 60
 startup_delay_seconds = 20
+# 同一聊天流两次手动看盘（/股 试跑、sim_trader_review）之间的最小间隔，秒；0 表示不限
+manual_cooldown_seconds = 60
 
 [model]
 # 决策用 planner（结构化输出更稳），播报用 replyer（她平时说话的那个）

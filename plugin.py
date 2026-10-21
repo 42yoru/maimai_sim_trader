@@ -44,7 +44,7 @@ class PluginSectionConfig(PluginConfigBase):
     __ui_order__ = 0
 
     enabled: bool = Field(default=True, description="是否启用插件")
-    config_version: str = Field(default="0.6.0", description="配置版本")
+    config_version: str = Field(default="0.6.2", description="配置版本")
 
 
 class MxSectionConfig(PluginConfigBase):
@@ -93,6 +93,12 @@ class ScheduleSectionConfig(PluginConfigBase):
     max_interval_minutes: int = Field(default=240, ge=5, le=600, description="两次看盘的最大间隔")
     idle_sleep_seconds: int = Field(default=60, ge=10, le=600, description="后台循环的空转间隔")
     startup_delay_seconds: int = Field(default=20, ge=0, le=600, description="插件加载后延迟多久开始")
+    manual_cooldown_seconds: int = Field(
+        default=60,
+        ge=0,
+        le=3600,
+        description="同一聊天流两次手动看盘（/股 试跑、sim_trader_review）之间的最小间隔；0 表示不限",
+    )
 
 
 class ModelSectionConfig(PluginConfigBase):
@@ -218,6 +224,8 @@ class SimTraderPlugin(MaiBotPlugin):
         self._bot_name = ""
         self._bot_persona = ""
         self._busy = False
+        # 手动触发的手动看盘冷却：{聊天流: 上次触发时间}
+        self._manual_runs: Dict[str, float] = {}
 
     # ──── 生命周期 ────
 
@@ -343,6 +351,27 @@ class SimTraderPlugin(MaiBotPlugin):
         if self._state is None:
             raise RuntimeError("状态尚未初始化")
         return self._state
+
+    # ──── 手动看盘的闸门 ────
+
+    def _manual_cooldown_left(self, stream_key: str) -> float:
+        """同一聊天流还要等多少秒才能再手动看盘；0 表示可以立刻跑。"""
+
+        cooldown = self.config.schedule.manual_cooldown_seconds
+        if cooldown <= 0:
+            return 0.0
+        last = self._manual_runs.get(stream_key, 0.0)
+        return max(0.0, cooldown - (time.time() - last))
+
+    def _mark_manual_run(self, stream_key: str) -> None:
+        """记下这次手动看盘的时刻，供冷却判断使用。"""
+
+        self._manual_runs[stream_key] = time.time()
+
+    def _in_trading_session(self, now: datetime) -> bool:
+        """当前是否落在配置的交易时段内。"""
+
+        return in_sessions(now, parse_sessions(self.config.schedule.sessions))
 
     # ──── 后台循环 ────
 
@@ -1072,6 +1101,11 @@ class SimTraderPlugin(MaiBotPlugin):
     async def _handle_dry_run(self, stream_id: str) -> None:
         """立刻跑一轮决策，但不下单、不播报、不写状态。"""
 
+        cooldown_left = self._manual_cooldown_left(stream_id)
+        if cooldown_left > 0:
+            await self._send(stream_id, f"刚看过一轮，{int(cooldown_left) + 1} 秒后再试。")
+            return
+        self._mark_manual_run(stream_id)
         await self._send(stream_id, f"{self._bot_name or DEFAULT_BOT_NAME}去看一眼盘，稍等一下……")
         now = datetime.now()
         today = now.strftime("%Y-%m-%d")
@@ -1155,8 +1189,8 @@ class SimTraderPlugin(MaiBotPlugin):
         "sim_trader_review",
         description=(
             "让模拟盘此刻重新看一次盘并自行决定买不买、卖不卖。"
-            "会真实下单到模拟盘账户（不额外播报），聊天里任何人都能触发，"
-            "调用前请确认确实需要现在看一次盘"
+            "交易时段内会真实下单到模拟盘（不额外播报），闭市时只做决策不下单；"
+            "聊天里任何人都能触发，同一聊天流有最短间隔限制"
         ),
         parameters=[
             ToolParameterInfo(
@@ -1168,22 +1202,33 @@ class SimTraderPlugin(MaiBotPlugin):
         ],
     )
     async def tool_review(self, reason: str = "", **kwargs: Any) -> Dict[str, Any]:
-        """主动看盘：跑一轮完整决策（会真实下单，但不额外播报）。"""
+        """主动看盘：交易时段内跑完整一轮（会真实下单），闭市时自动降级为只看不做。"""
 
-        del kwargs
+        context = self._invocation_context(kwargs)
+        stream_key = context["stream_id"] or "unknown"
         if self._busy:
             return {"success": False, "content": "已经有一轮在看盘了，等它跑完再说。"}
         now = datetime.now()
         today = now.strftime("%Y-%m-%d")
+        cooldown_left = self._manual_cooldown_left(stream_key)
+        if cooldown_left > 0:
+            return {"success": False, "content": f"刚跑过一轮，{int(cooldown_left) + 1} 秒后再来。"}
+        # 闭市后允许聊天里问"你会怎么做"，但不能真下单：这一轮自动降级为试跑
+        off_session = not self._in_trading_session(now)
+        self._mark_manual_run(stream_key)
         if reason.strip():
-            self.ctx.logger.info("聊天里触发看盘，理由：%s", reason.strip()[:80])
+            self.ctx.logger.info(
+                "聊天里触发看盘，理由：%s，时段内=%s", reason.strip()[:80], not off_session
+            )
         try:
-            notes = await self._run_round(now, today, announce=False)
+            notes = await self._run_round(now, today, announce=False, dry_run=off_session)
         except Exception as exc:
             self.ctx.logger.error("聊天里触发看盘失败", exc_info=True)
             return {"success": False, "content": f"看盘失败了：{exc}"}
         state = self._require_state().load()
         summary = [f"心情：{state.last_mood or '平静'}", f"判断：{state.last_reasoning or '（没写）'}"]
+        if off_session:
+            summary.insert(0, "现在不在交易时段，这一轮只看不做，没有下单。")
         if notes:
             summary.extend(notes)
         else:

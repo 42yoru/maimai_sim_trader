@@ -112,11 +112,11 @@ cp maimai_sim_trader/config.toml.example maimai_sim_trader/config.toml   # 可�
 | 工具 | 说明 |
 |---|---|
 | `sim_trader_query` | `action` 取 `status` / `pool` / `orders` / `history` / `quote`，分别是账户、池子、委托、最近判断、单只票行情 |
-| `sim_trader_review` | 让她**此刻重新看一次盘并自行决定买不买**，跑完把心情、判断和动作回报给她（**会真实下单到模拟盘**） |
+| `sim_trader_review` | 让她**此刻重新看一次盘并自行决定买不买**，跑完把心情、判断和动作回报给她。交易时段内**会真实下单到模拟盘**，闭市时自动降级为只看不做 |
 
 所以群里有人喊「麦麦梭哈茅台」，麦麦可以自己决定要不要调 `sim_trader_review`——听不听、动不动，都是它自己的判断，插件只提供能力。工具触发的这一轮**不会额外播报**，结果回到聊天里由它自己讲。
 
-**这两个工具都没有权限门槛**：`sim_trader_query` 只是读数据，`sim_trader_review` 会让它跑一整轮决策、**可能真的下模拟单**。群里任何人都能触发，只是最终买不买仍由它自己判断。不想让聊天影响交易的话，可以在宿主侧关掉这个工具的可见性，或把播报群换成只读的群。
+**这两个工具都没有权限门槛**：`sim_trader_query` 只是读数据，`sim_trader_review` 会让它跑一整轮决策。交易时段内可能真的下模拟单，闭市时只算不做；同一聊天流两次手动看盘之间有冷却（`[schedule] manual_cooldown_seconds`，默认 60 秒），避免有人在群里反复刷、白烧模型的 token。
 
 真下单仍然受 `max_trades_per_day`、单票上限、现金底线约束。
 
