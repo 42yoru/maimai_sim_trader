@@ -659,6 +659,33 @@ class ManualTriggerGateTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(any("秒后再试" in text for text in texts), texts)
             self.assertEqual(len(harness.llm_prompts), 1)
 
+    async def test_dry_run_refused_while_another_round_runs(self) -> None:
+        """后台循环正在跑的时候，试跑不该再起一轮。"""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            plugin = build_plugin(Path(tmp))
+            harness = FakeHarness()
+            plugin.ctx._rpc_call = harness.rpc
+            plugin._busy = True
+
+            await plugin._handle_dry_run(GROUP_SESSION)
+
+            self.assertEqual(harness.llm_prompts, [])
+            self.assertTrue(any("已经有一轮在看盘" in item["text"] for item in harness.sent), harness.sent)
+
+    async def test_round_restores_previous_busy_flag(self) -> None:
+        """一轮结束时只恢复自己进来前的状态，不把并发那轮的标志清掉。"""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            plugin = build_plugin(Path(tmp))
+            plugin.config.schedule.sessions = _session_covering(datetime.now())
+            plugin._quotes = _quotes_stamped_today()
+            plugin._busy = True
+
+            await plugin._run_round(datetime.now(), datetime.now().strftime("%Y-%m-%d"), dry_run=True)
+
+            self.assertTrue(plugin._busy)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -458,6 +458,8 @@ class SimTraderPlugin(MaiBotPlugin):
         announce=False 时照常下单，但不往群里播报（供聊天里的工具调用使用）。
         """
 
+        # 记下进来之前的状态：并发跑两轮时，先结束的那个不该把还在跑的那轮标志清掉
+        was_busy = self._busy
         self._busy = True
         store = self._require_state()
         state = store.load()
@@ -521,7 +523,7 @@ class SimTraderPlugin(MaiBotPlugin):
                 )
             return round_notes
         finally:
-            self._busy = False
+            self._busy = was_busy
 
     async def _fetch_pool_quotes(self) -> Dict[str, Quote]:
         """拉股票池的实时快照。
@@ -1101,6 +1103,9 @@ class SimTraderPlugin(MaiBotPlugin):
     async def _handle_dry_run(self, stream_id: str) -> None:
         """立刻跑一轮决策，但不下单、不播报、不写状态。"""
 
+        if self._busy:
+            await self._send(stream_id, "已经有一轮在看盘了，等它跑完再说。")
+            return
         cooldown_left = self._manual_cooldown_left(stream_id)
         if cooldown_left > 0:
             await self._send(stream_id, f"刚看过一轮，{int(cooldown_left) + 1} 秒后再试。")

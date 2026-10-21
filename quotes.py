@@ -11,7 +11,7 @@ from typing import Dict, Iterable, List, Optional
 
 import httpx
 
-SNAPSHOT_URL = "http://qt.gtimg.cn/q="
+SNAPSHOT_URL = "https://qt.gtimg.cn/q="
 # 腾讯返回 GBK，且一次最多几十只比较稳
 MAX_BATCH = 40
 

@@ -80,12 +80,16 @@ def check_group_session(group_id: str, platform: str) -> None:
 
 async def main() -> None:
     config = load_config()
-    api_key = str(config["mx"]["api_key"]).strip()
+    mx_section = config.get("mx")
+    if not isinstance(mx_section, dict):
+        record("妙想 Key", False, "config.toml 里没有 [mx] 段，先按 config.toml.example 补上")
+        return
+    api_key = str(mx_section.get("api_key") or "").strip()
     if not api_key:
-        record("妙想 Key", False, "[mx] api_key 为空")
+        record("妙想 Key", False, "[mx] api_key 为空；也可以改用环境变量 MX_APIKEY")
         return
 
-    mx = MxClient(api_key, base_url=str(config["mx"]["base_url"]))
+    mx = MxClient(api_key, base_url=str(mx_section.get("base_url") or ""))
     quotes = TencentQuoteClient()
     try:
         try:
@@ -113,11 +117,12 @@ async def main() -> None:
         except Exception as exc:
             record("腾讯行情", False, str(exc))
 
-        for group_id in config["notify"]["group_ids"]:
-            check_group_session(str(group_id), str(config["notify"]["platform"]))
+        notify = config.get("notify") if isinstance(config.get("notify"), dict) else {}
+        for group_id in notify.get("group_ids") or []:
+            check_group_session(str(group_id), str(notify.get("platform") or "qq"))
 
-        if config["notify"]["private_enabled"]:
-            record("私聊播报", True, f"已启用：{config['notify']['private_user_ids']}")
+        if notify.get("private_enabled"):
+            record("私聊播报", True, f"已启用：{notify.get('private_user_ids')}")
         else:
             record("私聊播报", True, "已实现但关闭（private_enabled = false）")
     finally:

@@ -4,8 +4,8 @@
   <a href="https://github.com/42yoru/maimai_sim_trader/actions/workflows/ci.yml"><img src="https://github.com/42yoru/maimai_sim_trader/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License"></a>
   <a href="https://github.com/Mai-with-u/MaiBot"><img src="https://img.shields.io/badge/MaiBot-1.3.9%2B-orange.svg" alt="MaiBot"></a>
-  <a href="https://github.com/Mai-with-u/maibot-plugin-sdk"><img src="https://img.shields.io/badge/SDK-2.14.0%2B-green.svg" alt="SDK"></a>
-  <img src="https://img.shields.io/badge/python-3.10%2B-blue.svg" alt="Python">
+  <a href="https://github.com/Mai-with-u/maibot-plugin-sdk"><img src="https://img.shields.io/badge/SDK-2.12.0%2B-green.svg" alt="SDK"></a>
+  <img src="https://img.shields.io/badge/python-3.12%2B-blue.svg" alt="Python">
 </p>
 
 让麦麦用自己的判断去炒一个东方财富妙想模拟组合，然后在指定群或私聊里汇报盈亏。
@@ -215,6 +215,7 @@ maimai_sim_trader/
 - 模拟组合须在妙想 Skills 页面绑定后 `mockTrading/*` 才可用，否则返回 `404 请先绑定账户~`。
 - 决策模型每轮一次调用；她可以把间隔拉到 240 分钟来省额度。
 - 插件不接任何真实券商通道，纯模拟盘。
+- **两个 HTTP 客户端都关掉了 `trust_env`**（`mx_client.py` / `quotes.py`），即**不走系统代理和 `HTTP(S)_PROXY` 环境变量**。这是为了躲开畸形代理变量导致 httpx 建 URL 崩溃的老问题。部署环境如果必须通过代理才能出网，妙想和腾讯行情都会连不通，需要给主机配透明代理，或把 `[mx] base_url` 指到可直连的地址。
 
 ## 测试
 
