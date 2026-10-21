@@ -105,7 +105,7 @@ cp maimai_sim_trader/config.toml.example maimai_sim_trader/config.toml
 | `sim_trader_query` | `action` 取 `status` / `pool` / `orders` / `history` / `quote`，分别是账户、池子、委托、最近判断、单只票行情 |
 | `sim_trader_review` | 让她**此刻重新看一次盘并自行决定买不买**，跑完把心情、判断和动作回报给她 |
 
-所以群里有人喊「夜夜梭哈茅台」，她可以自己决定要不要调 `sim_trader_review`——听不听、动不动，都是她的自由意志，插件只提供能力。工具触发的这一轮**不会额外播报**，结果回到聊天里由她自己讲。
+所以群里有人喊「麦麦梭哈茅台」，她可以自己决定要不要调 `sim_trader_review`——听不听、动不动，都是她的自由意志，插件只提供能力。工具触发的这一轮**不会额外播报**，结果回到聊天里由她自己讲。
 
 查询不需要权限；真下单仍然受 `max_trades_per_day`、单票 20%、现金底线约束。
 
