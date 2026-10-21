@@ -1,5 +1,14 @@
 """开盘前自检：确认妙想、行情、群会话都就绪。
 
+**仅开发者本地自检，不属于插件运行时。** 它会以只读方式打开宿主实例的
+``data/MaiBot.db`` 查 ``chat_sessions``，以此确认配置里的群号确实存在；
+插件本身不碰宿主数据库，运行时一律走 ``chat.get_group_streams`` 能力。
+这段 SQL 只是给开发者省事的离线检查，宿主库结构一变它就会报错。
+
+实例目录默认按「插件目录的上两级」推断，可用环境变量覆盖：
+
+    set MAIBOT_DIR=E:\\YeYe\\maibot && python scripts/preflight.py
+
 不打印任何密钥。用法（在插件目录下）：
 
     python scripts/preflight.py
@@ -11,12 +20,13 @@ from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
 import asyncio
+import os
 import sqlite3
 import sys
 import tomllib
 
 PLUGIN_DIR = Path(__file__).resolve().parents[1]
-MABOT_DIR = PLUGIN_DIR.parents[1]
+MABOT_DIR = Path(os.environ.get("MAIBOT_DIR") or PLUGIN_DIR.parents[1])
 sys.path.insert(0, str(PLUGIN_DIR))
 
 from mx_client import MxApiError, MxClient  # noqa: E402
@@ -40,11 +50,11 @@ def load_config() -> Dict[str, Any]:
 
 
 def check_group_session(group_id: str, platform: str) -> None:
-    """确认 MaiBot 里真有这个群的会话。"""
+    """确认 MaiBot 里真有这个群的会话（直接读宿主库，仅本地自检用）。"""
 
     db_path = MABOT_DIR / "data" / "MaiBot.db"
     if not db_path.exists():
-        record("群会话", False, f"找不到数据库 {db_path}")
+        record("群会话", False, f"找不到数据库 {db_path}；可用环境变量 MAIBOT_DIR 指定实例目录")
         return
     conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
     try:
@@ -52,6 +62,9 @@ def check_group_session(group_id: str, platform: str) -> None:
             "SELECT session_id, group_name, account_id FROM chat_sessions WHERE group_id = ? AND platform = ?",
             (group_id, platform),
         ).fetchall()
+    except sqlite3.DatabaseError as exc:
+        record("群会话", False, f"查询 chat_sessions 失败（{exc}）；宿主库结构可能变了，忽略此项")
+        return
     finally:
         conn.close()
     if not rows:

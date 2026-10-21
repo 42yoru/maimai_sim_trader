@@ -11,10 +11,21 @@ from typing import Any, Dict, List, Optional
 
 import json
 import os
+import re
 import time
 from pathlib import Path
 
 POOL_VERSION = 1
+
+# 沪深股票代码统一是六位数字；不校验的话，池子里混进一个错码就会在每轮取行情时抛错
+CODE_PATTERN = re.compile(r"^\d{6}$")
+
+
+def is_valid_code(code: str) -> bool:
+    """判断是不是六位数字代码。"""
+
+    return bool(CODE_PATTERN.fullmatch(str(code).strip()))
+
 
 DEFAULT_POOL: tuple[tuple[str, str], ...] = (
     ("000333", "美的集团"),
@@ -162,11 +173,17 @@ class WatchlistStore:
         return None
 
     def add(self, code: str, name: str, *, note: str = "") -> bool:
-        """加一只票；已存在则返回 False。"""
+        """加一只票；已存在则返回 False。
+
+        代码必须是六位数字：池子里混进错码，每轮取行情都会抛错，
+        后台循环会一直失败到有人手动删掉它。
+        """
 
         normalized = code.strip()
         if not normalized:
             raise ValueError("股票代码不能为空")
+        if not is_valid_code(normalized):
+            raise ValueError(f"股票代码必须是六位数字，收到 {code!r}")
         items = self.load()
         if any(item.code == normalized for item in items):
             return False

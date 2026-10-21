@@ -537,6 +537,33 @@ class StartupConfigTests(unittest.IsolatedAsyncioTestCase):
             await plugin._stop_loop()
             self.assertIsNone(plugin._task)
 
+    async def test_non_https_base_url_is_rejected(self) -> None:
+        """base_url 会带着 API Key 一起发请求，只允许 https。"""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            plugin = build_plugin(Path(tmp))
+            plugin._mx = None
+            plugin.config.mx.base_url = "http://127.0.0.1:8000"
+
+            with self.assertRaises(RuntimeError) as raised:
+                plugin._require_mx()
+
+            self.assertIn("https", str(raised.exception))
+
+    async def test_fetch_skips_invalid_pool_codes(self) -> None:
+        """池子里有坏代码时只跳过它，不让整轮行情拉挂掉。"""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            plugin = build_plugin(Path(tmp))
+            plugin._watchlist._items = [
+                WATCH.PoolItem(code="601899", name="紫金矿业", added_at=0.0, note=""),
+                WATCH.PoolItem(code="坏代码", name="坏代码", added_at=0.0, note=""),
+            ]
+
+            quotes = await plugin._fetch_pool_quotes()
+
+            self.assertEqual(sorted(quotes), ["601899"])
+
     async def test_missing_notify_and_owner_are_reported(self) -> None:
         """播报目标和主人白名单为空时，启动日志里要有明确提示。"""
 

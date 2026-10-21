@@ -25,7 +25,7 @@ from .quotes import Quote, TencentQuoteClient
 from .report import build_plain_fallback, build_report_messages, build_snapshot_lines
 from .state import RuntimeState, StateStore
 from .trading import LOT_SIZE, check_sell, limit_price, resolve_quantity
-from .watchlist import WatchlistStore
+from .watchlist import WatchlistStore, is_valid_code
 
 LOGGER_NAME = "maimai.sim-trader"
 DEFAULT_BOT_NAME = "麦麦"
@@ -55,7 +55,10 @@ class MxSectionConfig(PluginConfigBase):
     __ui_order__ = 1
 
     api_key: str = Field(default="", description="东方财富妙想 API Key（mkt_v_ 开头）")
-    base_url: str = Field(default=DEFAULT_BASE_URL, description="妙想服务地址")
+    base_url: str = Field(
+        default=DEFAULT_BASE_URL,
+        description="妙想服务地址，必须是 https；不建议指向本机、内网或云元数据地址",
+    )
     timeout: float = Field(default=20.0, ge=1.0, le=120.0, description="单次请求超时，秒")
 
 
@@ -307,10 +310,14 @@ class SimTraderPlugin(MaiBotPlugin):
         api_key = self._api_key()
         if not api_key:
             raise RuntimeError("未配置妙想 API Key（[mx] api_key 或环境变量 MX_APIKEY）")
+        base_url = (self.config.mx.base_url or DEFAULT_BASE_URL).strip()
+        if not base_url.lower().startswith("https://"):
+            # 地址是主人自己填的，但 API Key 会跟着请求一起发出去，只允许 https
+            raise RuntimeError(f"[mx] base_url 必须是 https 地址，当前是 {base_url!r}")
         if self._mx is None:
             self._mx = MxClient(
                 api_key,
-                base_url=self.config.mx.base_url,
+                base_url=base_url,
                 timeout=self.config.mx.timeout,
                 logger=self.ctx.logger,
             )
@@ -488,12 +495,20 @@ class SimTraderPlugin(MaiBotPlugin):
             self._busy = False
 
     async def _fetch_pool_quotes(self) -> Dict[str, Quote]:
-        """拉股票池的实时快照。"""
+        """拉股票池的实时快照。
+
+        池子可能是手改过的，遇到非六位代码就跳过并告警：
+        让一个坏代码把整轮行情拉挂掉，比少看一只票糟糕得多。
+        """
 
         codes = self._require_watchlist().codes()
-        if not codes:
+        valid = [code for code in codes if is_valid_code(code)]
+        dropped = [code for code in codes if not is_valid_code(code)]
+        if dropped:
+            self.ctx.logger.warning("股票池里有不合法的代码，已跳过: %s", dropped)
+        if not valid:
             return {}
-        return await self._require_quotes().fetch(codes)
+        return await self._require_quotes().fetch(valid)
 
     async def _llm_generate(
         self,
@@ -1138,7 +1153,11 @@ class SimTraderPlugin(MaiBotPlugin):
 
     @Tool(
         "sim_trader_review",
-        description="让模拟盘此刻重新看一次盘并自行决定买不买、卖不卖",
+        description=(
+            "让模拟盘此刻重新看一次盘并自行决定买不买、卖不卖。"
+            "会真实下单到模拟盘账户（不额外播报），聊天里任何人都能触发，"
+            "调用前请确认确实需要现在看一次盘"
+        ),
         parameters=[
             ToolParameterInfo(
                 name="reason",

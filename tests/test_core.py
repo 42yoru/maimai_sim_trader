@@ -254,6 +254,17 @@ class WatchlistTests(unittest.TestCase):
             with self.assertRaises(WATCHLIST.WatchlistError):
                 WatchlistStore(path).load()
 
+    def test_add_rejects_non_six_digit_code(self) -> None:
+        """池子里混进错码会让每轮取行情都抛错，所以加的时候就要挡住。"""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = WatchlistStore(Path(tmp) / "watchlist.json")
+            store.load()
+            for bad in ("60051", "6005190", "sh600519", "abcdef", "  "):
+                with self.assertRaises(ValueError):
+                    store.add(bad, "坏代码")
+            self.assertTrue(store.add(" 600519 ", "贵州茅台"))
+
 
 class HoldingTests(unittest.TestCase):
     """持仓字段适配：字段名一变就得认出来，认不出就报错。"""

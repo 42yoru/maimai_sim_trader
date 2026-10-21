@@ -64,10 +64,10 @@ cp maimai_sim_trader/config.toml.example maimai_sim_trader/config.toml   # 可�
 
 | 节 | 关键项 | 说明 |
 |---|---|---|
-| `[mx]` | `api_key` | 妙想 API Key（`mkt_v_` 开头），**别提交到仓库**；留空读环境变量 `MX_APIKEY` |
+| `[mx]` | `api_key` / `base_url` | 妙想 API Key（`mkt_v_` 开头），**别提交到仓库**；留空读环境变量 `MX_APIKEY`。`base_url` 必须是 `https://`，不建议指向本机/内网地址 |
 | `[account]` | `slippage` / `max_position_ratio` / `min_cash_reserve_ratio` / `max_trades_per_day` | 让价、单票上限、现金底线、当日笔数上限 |
 | `[schedule]` | `sessions` / `min_interval_minutes` / `max_interval_minutes` | 交易时段与她自选间隔的合法范围 |
-| `[model]` | `decision_task_name` / `report_task_name` / `max_tokens` | 默认决策用 `planner`、播报用 `replyer`；`max_tokens` 默认 2400，思考型模型给小了会只有思考没有正文 |
+| `[model]` | `decision_task_name` / `report_task_name` / `max_tokens` | 默认决策用 `planner`、播报用 `replyer`；`max_tokens` 默认 4000，思考型模型给小了会只有思考没有正文 |
 | `[notify]` | `group_ids` / `private_user_ids` / `private_enabled` | 默认全空：不填就不播报；私聊功能已实现但默认关 |
 | `[owner]` | `owners` | 能改股票池、调节奏的人，格式 `qq:123456789`；留空时只有查询类命令可用 |
 
@@ -112,11 +112,13 @@ cp maimai_sim_trader/config.toml.example maimai_sim_trader/config.toml   # 可�
 | 工具 | 说明 |
 |---|---|
 | `sim_trader_query` | `action` 取 `status` / `pool` / `orders` / `history` / `quote`，分别是账户、池子、委托、最近判断、单只票行情 |
-| `sim_trader_review` | 让她**此刻重新看一次盘并自行决定买不买**，跑完把心情、判断和动作回报给她 |
+| `sim_trader_review` | 让她**此刻重新看一次盘并自行决定买不买**，跑完把心情、判断和动作回报给她（**会真实下单到模拟盘**） |
 
 所以群里有人喊「麦麦梭哈茅台」，麦麦可以自己决定要不要调 `sim_trader_review`——听不听、动不动，都是它自己的判断，插件只提供能力。工具触发的这一轮**不会额外播报**，结果回到聊天里由它自己讲。
 
-查询不需要权限；真下单仍然受 `max_trades_per_day`、单票 20%、现金底线约束。
+**这两个工具都没有权限门槛**：`sim_trader_query` 只是读数据，`sim_trader_review` 会让它跑一整轮决策、**可能真的下模拟单**。群里任何人都能触发，只是最终买不买仍由它自己判断。不想让聊天影响交易的话，可以在宿主侧关掉这个工具的可见性，或把播报群换成只读的群。
+
+真下单仍然受 `max_trades_per_day`、单票上限、现金底线约束。
 
 ## 落盘
 
@@ -174,7 +176,7 @@ python scripts/preflight.py
 妙想账号里还没有把 API Key 绑定到模拟组合。去 [妙想 Skills 页面](https://dl.dfcfs.com/m/itc4) 找到「妙想模拟组合管理」，在「绑定组合名称」里填上组合名，点绑定。绑完再跑 `python scripts/preflight.py` 验证。
 
 **试跑报「模型只输出了思考过程没有正文」**
-决策模型的 `max_tokens` 太小，思考阶段就把额度用光了。把 `[model] max_tokens` 调大（默认 2400，思考型模型建议 3000+）。
+决策模型的 `max_tokens` 太小，思考阶段就把额度用光了。把 `[model] max_tokens` 调大（默认 4000）。
 
 **群里收不到播报**
 依次检查：`[notify] group_enabled` 是否为 true、`group_ids` 里的群号是否正确、`account_id` 留空是否匹配到了多个账号。日志里会有 `找不到群 xxx 的聊天流` 或 `命中 N 条聊天流` 的提示。

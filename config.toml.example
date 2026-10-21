@@ -1,10 +1,11 @@
 [plugin]
 enabled = true
-config_version = "0.5.1"
+config_version = "0.6.0"
 
 [mx]
 # 东方财富妙想 API Key，mkt_v_ 开头；留空则读环境变量 MX_APIKEY
 api_key = ""
+# 必须是 https；不建议指向本机、内网或云元数据地址（Key 会跟着请求发出去）
 base_url = "https://mkapi2.dfcfs.com/finskillshub"
 timeout = 20.0
 
