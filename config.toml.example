@@ -48,14 +48,15 @@ request_timeout_ms = 180000
 platform = "qq"
 # 只认这个账号下的聊天流，留空不限
 account_id = ""
-# 播报到哪个群
-group_ids = ["982628545"]
+# 播报到哪个群，填群号；留空表示不播报到任何群
+group_ids = []
 group_enabled = true
-# 私聊播报（功能已做好，先关着）
-private_user_ids = ["1215349250"]
+# 私聊播报（功能已做好，先关着）；启用后填要收播报的用户 ID
+private_user_ids = []
 private_enabled = false
 close_report_enabled = true
 close_report_after = "15:00"
 [owner]
-# 能改动股票池和看盘节奏的用户，格式 platform:user_id；查询类命令不受限
-owners = ["qq:1215349250"]
+# 能改动股票池和看盘节奏的用户，格式 platform:user_id，例如 "qq:123456789"
+# 留空表示只有查询类命令可用
+owners = []

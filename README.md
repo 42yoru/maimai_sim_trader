@@ -43,10 +43,18 @@
 ```bash
 cd MaiBot/plugins
 git clone https://github.com/42yoru/maimai_sim_trader.git
-cp maimai_sim_trader/config.toml.example maimai_sim_trader/config.toml
+cp maimai_sim_trader/config.toml.example maimai_sim_trader/config.toml   # 可选，见下
 ```
 
-然后编辑 `config.toml` 填入妙想 API Key（或改用环境变量 `MX_APIKEY`），重启 MaiBot 即可。
+**`config.toml` 不进仓库**（里面有 API Key），clone 下来是没有的。这一步其实可以省：直接启动 MaiBot，宿主会按插件声明的配置模型自动生成一份完整的 `config.toml`；手动 `cp` 只是为了拿到 `.example` 里的注释。
+
+首次启动后日志里会给几条提示，照着补就行：
+
+- `未配置妙想 API Key…后台循环不会启动` → 填 `[mx] api_key`（或设环境变量 `MX_APIKEY`），保存后循环自动开始
+- `没有配置播报目标…` → 填 `[notify] group_ids`
+- `owner.owners 为空…` → 填 `[owner] owners`，否则改股票池、调节奏的命令没人能用
+
+**仓库里的默认值全是空的**，不预置任何群号或用户 ID，别人装上不会往作者那边发消息。
 
 前置条件：妙想账号里已经有一个**模拟组合**，并且在妙想 Skills 页面把 API Key 绑定到它——否则 `mockTrading/*` 会返回 `404 请先绑定账户~`。
 
@@ -60,7 +68,8 @@ cp maimai_sim_trader/config.toml.example maimai_sim_trader/config.toml
 | `[account]` | `slippage` / `max_position_ratio` / `min_cash_reserve_ratio` / `max_trades_per_day` | 让价、单票上限、现金底线、当日笔数上限 |
 | `[schedule]` | `sessions` / `min_interval_minutes` / `max_interval_minutes` | 交易时段与她自选间隔的合法范围 |
 | `[model]` | `decision_task_name` / `report_task_name` / `max_tokens` | 默认决策用 `planner`、播报用 `replyer`；`max_tokens` 默认 2400，思考型模型给小了会只有思考没有正文 |
-| `[notify]` | `group_ids` / `private_user_ids` / `private_enabled` | 群播报默认开；私聊功能已实现但默认关 |
+| `[notify]` | `group_ids` / `private_user_ids` / `private_enabled` | 默认全空：不填就不播报；私聊功能已实现但默认关 |
+| `[owner]` | `owners` | 能改股票池、调节奏的人，格式 `qq:123456789`；留空时只有查询类命令可用 |
 
 **人设不在插件里配。** 启动时从宿主读 `bot.nickname`（自称）和 `personality.personality`（人格），决策和播报都用你自己 bot 的那一套——插件本身不带任何角色设定。宿主没配人设时退回通用称呼「麦麦」并在日志里警告。
 
@@ -105,7 +114,7 @@ cp maimai_sim_trader/config.toml.example maimai_sim_trader/config.toml
 | `sim_trader_query` | `action` 取 `status` / `pool` / `orders` / `history` / `quote`，分别是账户、池子、委托、最近判断、单只票行情 |
 | `sim_trader_review` | 让她**此刻重新看一次盘并自行决定买不买**，跑完把心情、判断和动作回报给她 |
 
-所以群里有人喊「麦麦梭哈茅台」，她可以自己决定要不要调 `sim_trader_review`——听不听、动不动，都是她的自由意志，插件只提供能力。工具触发的这一轮**不会额外播报**，结果回到聊天里由她自己讲。
+所以群里有人喊「麦麦梭哈茅台」，麦麦可以自己决定要不要调 `sim_trader_review`——听不听、动不动，都是它自己的判断，插件只提供能力。工具触发的这一轮**不会额外播报**，结果回到聊天里由它自己讲。
 
 查询不需要权限；真下单仍然受 `max_trades_per_day`、单票 20%、现金底线约束。
 

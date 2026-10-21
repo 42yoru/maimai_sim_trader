@@ -44,7 +44,7 @@ class PluginSectionConfig(PluginConfigBase):
     __ui_order__ = 0
 
     enabled: bool = Field(default=True, description="是否启用插件")
-    config_version: str = Field(default="0.5.1", description="配置版本")
+    config_version: str = Field(default="0.6.0", description="配置版本")
 
 
 class MxSectionConfig(PluginConfigBase):
@@ -133,8 +133,8 @@ class NotifySectionConfig(PluginConfigBase):
 
     platform: str = Field(default="qq", description="目标平台")
     account_id: str = Field(default="", description="只认这个账号下的聊天流，留空不限")
-    group_ids: List[str] = Field(default_factory=lambda: ["982628545"], description="播报到的群号")
-    private_user_ids: List[str] = Field(default_factory=lambda: ["1215349250"], description="播报到的私聊用户")
+    group_ids: List[str] = Field(default_factory=list, description="播报到的群号；留空表示不播报到任何群")
+    private_user_ids: List[str] = Field(default_factory=list, description="播报到的私聊用户；需 private_enabled")
     private_enabled: bool = Field(default=False, description="是否启用私聊播报（功能已做好，先不开）")
     group_enabled: bool = Field(default=True, description="是否启用群播报")
     close_report_enabled: bool = Field(default=True, description="收盘是否发一次复盘")
@@ -149,8 +149,8 @@ class OwnerSectionConfig(PluginConfigBase):
     __ui_order__ = 6
 
     owners: List[str] = Field(
-        default_factory=lambda: ["qq:1215349250"],
-        description="能改动股票池和看盘节奏的用户，格式 platform:user_id；查询类命令不受限",
+        default_factory=list,
+        description="能改动股票池和看盘节奏的用户，格式 platform:user_id；留空表示只有查询类命令可用",
     )
 
 
@@ -232,7 +232,25 @@ class SimTraderPlugin(MaiBotPlugin):
             len(self._watchlist.all()),
             data_dir,
         )
+        self._warn_if_not_configured()
         await self._restart_loop()
+
+    def _warn_if_not_configured(self) -> None:
+        """首次下载后最容易漏填的几项一次性说清楚，别让用户以为插件坏了。"""
+
+        notify = self.config.notify
+        targets = list(notify.group_ids)
+        if notify.private_enabled:
+            targets += list(notify.private_user_ids)
+        if not targets:
+            self.ctx.logger.warning(
+                "没有配置播报目标：[notify] group_ids 为空"
+                "（私聊播报未启用或 private_user_ids 为空），模拟盘会照常决策，但不会在任何聊天里说话。"
+            )
+        if not [item.strip() for item in self.config.owner.owners if item.strip()]:
+            self.ctx.logger.warning(
+                "owner.owners 为空：改动股票池、调整看盘节奏的命令暂时没人能用（查询类命令不受影响）。"
+            )
 
     async def _load_persona(self) -> None:
         """从 MaiBot 本体读取昵称与人设，插件不再自己定义一份。
@@ -278,10 +296,15 @@ class SimTraderPlugin(MaiBotPlugin):
 
     # ──── 客户端 ────
 
+    def _api_key(self) -> str:
+        """当前可用的妙想 API Key：配置优先，其次环境变量。"""
+
+        return self.config.mx.api_key.strip() or os.environ.get("MX_APIKEY", "").strip()
+
     def _require_mx(self) -> MxClient:
         """按当前配置拿妙想客户端；配置留空时读环境变量 MX_APIKEY。"""
 
-        api_key = self.config.mx.api_key.strip() or os.environ.get("MX_APIKEY", "").strip()
+        api_key = self._api_key()
         if not api_key:
             raise RuntimeError("未配置妙想 API Key（[mx] api_key 或环境变量 MX_APIKEY）")
         if self._mx is None:
@@ -322,6 +345,13 @@ class SimTraderPlugin(MaiBotPlugin):
         await self._stop_loop()
         if not self.config.plugin.enabled or not self.config.schedule.enabled:
             self.ctx.logger.info("模拟盘后台循环未启动（插件或节奏未启用）")
+            return
+        if not self._api_key():
+            # 没有 Key 就起循环，只会在交易时段每轮抛一次异常刷日志；配置补上后会自动启动
+            self.ctx.logger.warning(
+                "未配置妙想 API Key（[mx] api_key 或环境变量 MX_APIKEY），模拟盘后台循环不会启动；"
+                "填好并保存配置后会自动开始。"
+            )
             return
         self._task = asyncio.create_task(self._run_loop(), name="maimai_sim_trader.loop")
         self.ctx.logger.info("模拟盘后台循环已启动")

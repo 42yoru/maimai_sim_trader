@@ -6,12 +6,14 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import importlib.util
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -46,7 +48,7 @@ QUOTES = sys.modules[f"{MODULE_NAME}.quotes"]
 STATE = sys.modules[f"{MODULE_NAME}.state"]
 WATCH = sys.modules[f"{MODULE_NAME}.watchlist"]
 
-GROUP_ID = "982628545"
+GROUP_ID = "123456789"
 GROUP_SESSION = "group-session-1"
 
 DECISION_TEXT = json.dumps(
@@ -152,6 +154,27 @@ class FakeHarness:
         raise AssertionError(f"未预期的能力调用: {capability}")
 
 
+def _quotes_stamped_today() -> Any:
+    """假行情，但把快照日期改成今天。
+
+    ``_run_round`` 会把「行情最新日期 != 今天」当成非交易日直接返回，
+    所以跑真实 ``now()`` 的用例必须让快照日期跟着走，否则这条测试会随日期腐烂。
+    """
+
+    stamp = f"{datetime.now().strftime('%Y%m%d')}100000"
+    base = FakeQuotes()
+
+    class TodayQuotes:
+        async def fetch(self, codes: Any) -> Dict[str, Any]:
+            snapshot = await base.fetch(codes)
+            return {code: replace(quote, updated_at=stamp) for code, quote in snapshot.items()}
+
+        async def close(self) -> None:
+            return None
+
+    return TodayQuotes()
+
+
 def build_plugin(tmp_dir: Path) -> Any:
     """构造一个装好假依赖的插件实例。"""
 
@@ -159,6 +182,7 @@ def build_plugin(tmp_dir: Path) -> Any:
     config = PLUGIN_MODULE.SimTraderPlugin.build_default_config()
     config["mx"]["api_key"] = "test-key"
     config["notify"]["group_ids"] = [GROUP_ID]
+    config["owner"]["owners"] = [f"qq:{OWNER_USER}"]
     plugin.set_plugin_config(config)
 
     paths = PluginPaths(data_dir=tmp_dir / "data", runtime_dir=tmp_dir / "runtime")
@@ -340,7 +364,7 @@ class TickTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("麦麦", sent[0])
 
 
-OWNER_USER = "1215349250"
+OWNER_USER = "100000001"
 STRANGER_USER = "999999999"
 
 
@@ -468,11 +492,65 @@ class ToolTests(unittest.IsolatedAsyncioTestCase):
                 raise AssertionError(capability)
 
             plugin.ctx._rpc_call = rpc
+            # 这条走的是真实 now()，假行情的日期要换成今天，否则会被判成非交易日
+            plugin._quotes = _quotes_stamped_today()
             result = await plugin.tool_review(reason="群里有人怂恿加仓")
             self.assertTrue(result["success"], result)
             self.assertEqual(len(plugin._mx.placed), 2)
             self.assertEqual(sent, [], "工具触发的看盘不该再发群播报")
             self.assertIn("心情", result["content"])
+
+
+class StartupConfigTests(unittest.IsolatedAsyncioTestCase):
+    """首次下载后的默认配置与启动行为：不带作者个人信息，也不空转。"""
+
+    def test_default_config_carries_no_personal_ids(self) -> None:
+        """默认配置里不该预置任何群号 / 用户 ID（否则别人装上会往作者群里发）。"""
+
+        config = PLUGIN_MODULE.SimTraderPlugin.build_default_config()
+
+        self.assertEqual(config["notify"]["group_ids"], [])
+        self.assertEqual(config["notify"]["private_user_ids"], [])
+        self.assertEqual(config["owner"]["owners"], [])
+        self.assertEqual(config["mx"]["api_key"], "")
+
+    async def test_loop_not_started_without_api_key(self) -> None:
+        """没有 API Key 就不起后台循环，免得交易时段每轮抛一次异常。"""
+
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {"MX_APIKEY": ""}):
+            plugin = build_plugin(Path(tmp))
+            plugin.config.mx.api_key = ""
+
+            await plugin._restart_loop()
+
+            self.assertIsNone(plugin._task)
+
+    async def test_loop_started_with_api_key(self) -> None:
+        """有 Key 就正常起循环。"""
+
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {"MX_APIKEY": ""}):
+            plugin = build_plugin(Path(tmp))
+
+            await plugin._restart_loop()
+
+            self.assertIsNotNone(plugin._task)
+            await plugin._stop_loop()
+            self.assertIsNone(plugin._task)
+
+    async def test_missing_notify_and_owner_are_reported(self) -> None:
+        """播报目标和主人白名单为空时，启动日志里要有明确提示。"""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            plugin = build_plugin(Path(tmp))
+            plugin.config.notify.group_ids = []
+            plugin.config.owner.owners = []
+
+            with self.assertLogs(plugin.ctx.logger, level="WARNING") as captured:
+                plugin._warn_if_not_configured()
+
+            joined = "\n".join(captured.output)
+            self.assertIn("没有配置播报目标", joined)
+            self.assertIn("owner.owners 为空", joined)
 
 
 if __name__ == "__main__":
