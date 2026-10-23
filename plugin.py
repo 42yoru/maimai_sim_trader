@@ -44,7 +44,7 @@ class PluginSectionConfig(PluginConfigBase):
     __ui_order__ = 0
 
     enabled: bool = Field(default=True, description="是否启用插件")
-    config_version: str = Field(default="0.6.4", description="配置版本")
+    config_version: str = Field(default="0.6.5", description="配置版本")
 
 
 class MxSectionConfig(PluginConfigBase):

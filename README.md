@@ -8,6 +8,8 @@
   <img src="https://img.shields.io/badge/python-3.12%2B-blue.svg" alt="Python">
 </p>
 
+![麦麦模拟盘](assets/banner.jpg)
+
 让你的 bot 拿**假钱**去炒股：自己看盘、自己判断、自己下单，然后像个人一样在群里汇报盈亏。
 
 > **先回答三个最常见的问题**
@@ -317,4 +319,4 @@ python -m unittest discover -s tests -t .
 
 ## 许可证
 
-[MIT](LICENSE)
+代码用 [MIT](LICENSE)。插件图标（`icon.png`）由作者用 AI 图像模型生成，随本插件一同以 MIT 发布。
