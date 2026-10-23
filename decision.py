@@ -68,7 +68,7 @@ SYSTEM_PROMPT = """{header}
 规则（必须遵守）：
 1. 只能买卖股票池里的股票；想买池子外的票，先把它加进池子再说。
 2. A 股 T+1，当天买的不能当天卖；数量必须是 100 股的整数倍。
-3. 单票仓位不超过总资产的 20%，且至少要留 20% 现金——除非你在清仓，否则不要满仓。
+3. 单票仓位不超过总资产的 {max_position_pct}，且至少要留 {min_cash_pct} 现金——除非你在清仓，否则不要满仓。
 4. 可以什么都不做。没机会就不动，"今天不想动"是一个完全体面的答案。
 5. 每轮只做真正的判断，不要为了显勤奋而交易。
 6. 你可以自己决定下次多久后再看盘（next_check_minutes，10~240 分钟）：行情剧烈就早点回来，平淡就久一点。
@@ -218,8 +218,17 @@ def build_messages(
     idle_note: str = "",
     bot_name: str = "麦麦",
     persona: str = "",
+    risk_style: str = "",
+    max_position_pct: str = "20%",
+    min_cash_pct: str = "20%",
 ) -> List[Dict[str, str]]:
-    """拼出本轮决策用的 messages。"""
+    """拼出本轮决策用的 messages。
+
+    Args:
+        risk_style: 当前风险档的风格提示（稳健/激进/梭哈），留空则不注入。
+        max_position_pct / min_cash_pct: 由配置与风险档算出的实际限制，
+            直接写进 system prompt，避免 prompt 里的数字和代码里的校验对不上。
+    """
 
     balance_lines = [
         f"总资产 {money(balance.get('totalAssets'))}",
@@ -255,8 +264,15 @@ def build_messages(
         ]
     )
     header = persona.strip() or f"你是{bot_name}。"
+    system_text = (
+        SYSTEM_PROMPT.replace("{header}", header)
+        .replace("{max_position_pct}", max_position_pct)
+        .replace("{min_cash_pct}", min_cash_pct)
+    )
+    if risk_style.strip():
+        system_text = f"{system_text}\n\n【这一轮的风格】\n{risk_style.strip()}"
     return [
-        {"role": "system", "content": SYSTEM_PROMPT.replace("{header}", header)},
+        {"role": "system", "content": system_text},
         {"role": "user", "content": user_text},
     ]
 

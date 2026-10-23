@@ -140,12 +140,29 @@ python scripts/preflight.py
 |---|---|---|
 | `[mx]` | `api_key` / `base_url` | 妙想 API Key（`mkt_v_` 开头），**别提交到仓库**；留空读环境变量 `MX_APIKEY`。`base_url` 必须是 `https://`，不建议指向本机/内网地址 |
 | `[account]` | `slippage` / `max_position_ratio` / `min_cash_reserve_ratio` / `max_trades_per_day` | 让价、单票上限、现金底线、当日笔数上限 |
+| `[risk]` | `profile` | 决策大胆程度：`steady` 稳健 / `aggressive` 激进 / `yolo` 梭哈，见下 |
 | `[schedule]` | `sessions` / `min_interval_minutes` / `max_interval_minutes` / `manual_cooldown_seconds` | 交易时段、她自选间隔的合法范围、手动看盘的冷却 |
 | `[model]` | `decision_task_name` / `report_task_name` / `max_tokens` | 默认决策用 `planner`、播报用 `replyer`；`max_tokens` 默认 4000，思考型模型给小了会只有思考没有正文 |
 | `[notify]` | `group_ids` / `private_user_ids` / `private_enabled` | 默认全空：不填就不播报；私聊功能已实现但默认关 |
 | `[owner]` | `owners` | 能改股票池、调节奏的人，格式 `qq:123456789`；留空时只有查询类命令可用 |
 
 **人设不在插件里配。** 启动时从宿主读 `bot.nickname`（自称）和 `personality.personality`（人格），决策和播报都用你自己 bot 的那一套——插件本身不带任何角色设定。宿主没配人设时退回通用称呼「麦麦」并在日志里警告。
+
+### 三档胆量：稳健 / 激进 / 梭哈
+
+`[risk] profile` 控制它有多敢下手。档位**不是另起一套数字**，而是在 `[account]` 里你自己填的数上按倍数缩放：
+
+| 档位 | 单票上限 | 现金底线 | 每日笔数 | 让价 | 气质 |
+|---|---|---|---|---|---|
+| `steady` 稳健（默认） | ×1.0 → 20% | ×1.0 → 20% | ×1.0 → 6 | +0 | 先想最坏情况，宁可错过 |
+| `aggressive` 激进 | ×1.4 → 28% | ×0.5 → 10% | ×1.8 → 11 | +0.1% | 看得顺眼就上，但要说得出理由 |
+| `yolo` 梭哈 | ×1.8 → 36% | ×0.1 → 2% | ×2.0 → 12 | +0.2% | 允许重仓和试错，亏了也是模拟盘 |
+
+「→」后面是按默认 `[account]` 算出来的实际值。代码里还有一道**绝对上限**：单票不超过 40%、每日不超过 12 笔，档位再怎么调也翻不过去——一把梭到账户当天归零，就没什么好看的了。
+
+档位同时会往决策 prompt 里加一句当轮气质，并且把**实际生效的限制数字**写进规则里（不会再出现「prompt 说 20%、代码按 35% 校验」这种自相矛盾）。
+
+> 提醒一句：**更激进 ≠ 更赚钱**，只是换手更勤、仓位更重、波动更大。想看自家 bot 亏得更有观赏性，梭哈档确实更有效 (｡•̀ᴗ-)✧
 
 ## 命令
 

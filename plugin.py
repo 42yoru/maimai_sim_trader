@@ -44,7 +44,7 @@ class PluginSectionConfig(PluginConfigBase):
     __ui_order__ = 0
 
     enabled: bool = Field(default=True, description="是否启用插件")
-    config_version: str = Field(default="0.6.5", description="配置版本")
+    config_version: str = Field(default="0.7.0", description="配置版本")
 
 
 class MxSectionConfig(PluginConfigBase):
@@ -163,16 +163,73 @@ class OwnerSectionConfig(PluginConfigBase):
     )
 
 
+class RiskSectionConfig(PluginConfigBase):
+    """决策大胆程度。"""
+
+    __ui_label__ = "风险偏好"
+    __ui_icon__ = "flame"
+    __ui_order__ = 7
+
+    profile: str = Field(
+        default="steady",
+        description=(
+            "决策大胆程度：steady 稳健 / aggressive 激进 / yolo 梭哈。"
+            "档位以 [account] 里的数字为基准按倍数调整，再夹到代码里的绝对上限；"
+            "写错了会直接报错，不会静默退回默认档"
+        ),
+    )
+
+
 class SimTraderConfig(PluginConfigBase):
     """插件总配置。"""
 
     plugin: PluginSectionConfig = Field(default_factory=PluginSectionConfig)
     mx: MxSectionConfig = Field(default_factory=MxSectionConfig)
     account: AccountSectionConfig = Field(default_factory=AccountSectionConfig)
+    risk: RiskSectionConfig = Field(default_factory=RiskSectionConfig)
     schedule: ScheduleSectionConfig = Field(default_factory=ScheduleSectionConfig)
     model: ModelSectionConfig = Field(default_factory=ModelSectionConfig)
     notify: NotifySectionConfig = Field(default_factory=NotifySectionConfig)
     owner: OwnerSectionConfig = Field(default_factory=OwnerSectionConfig)
+
+
+# ──── 风险档位 ────
+
+# 档位只做「倍数调整」，基准仍然是 [account] 里用户自己填的数字：
+# 这样老配置升级上来行为不变（稳健 = ×1.0），想调单个数字也照样生效。
+RISK_PROFILES: Dict[str, Dict[str, Any]] = {
+    "steady": {
+        "label": "稳健",
+        "position_multiplier": 1.0,
+        "cash_multiplier": 1.0,
+        "trades_multiplier": 1.0,
+        "slippage_delta": 0.0,
+        "style": "这一轮按稳健档来：先想最坏情况，宁可错过也别追高；没把握就空着，等更清楚的机会。",
+    },
+    "aggressive": {
+        "label": "激进",
+        "position_multiplier": 1.4,
+        "cash_multiplier": 0.5,
+        "trades_multiplier": 1.8,
+        "slippage_delta": 0.001,
+        "style": "这一轮按激进档来：看得顺眼就上，允许比平时更集中、更频繁，但每笔都要说得出理由。",
+    },
+    "yolo": {
+        "label": "梭哈",
+        "position_multiplier": 1.8,
+        "cash_multiplier": 0.1,
+        "trades_multiplier": 2.0,
+        "slippage_delta": 0.002,
+        "style": (
+            "这一轮按梭哈档来：想干就干，允许重仓、允许试错，反正亏的也是模拟盘；"
+            "但别把话说满，也别为了热闹硬凑交易。"
+        ),
+    },
+}
+
+# 绝对上限：档位再怎么调也越不过去，避免一把梭到账户当天失去观赏价值
+HARD_MAX_POSITION_RATIO = 0.40
+HARD_MAX_TRADES_PER_DAY = 12
 
 
 # ──── 时间与时段 ────
@@ -351,6 +408,48 @@ class SimTraderPlugin(MaiBotPlugin):
         if self._state is None:
             raise RuntimeError("状态尚未初始化")
         return self._state
+
+    # ──── 风险档位 ────
+
+    def _risk_profile(self) -> Dict[str, Any]:
+        """按配置取当前风险档；写错了直接报错，不静默退回默认档。"""
+
+        name = str(self.config.risk.profile or "").strip().lower()
+        profile = RISK_PROFILES.get(name)
+        if profile is None:
+            raise RuntimeError(
+                f"[risk] profile 只支持 {' / '.join(RISK_PROFILES)}，当前为 {self.config.risk.profile!r}"
+            )
+        return profile
+
+    def _effective_limits(self) -> Dict[str, float]:
+        """把档位倍数作用到用户配置的数字上，并夹到代码里的绝对上限。"""
+
+        account = self.config.account
+        profile = self._risk_profile()
+        position = account.max_position_ratio * float(profile["position_multiplier"])
+        cash = account.min_cash_reserve_ratio * float(profile["cash_multiplier"])
+        trades = round(account.max_trades_per_day * float(profile["trades_multiplier"]))
+        slippage = account.slippage + float(profile["slippage_delta"])
+        return {
+            "max_position_ratio": min(HARD_MAX_POSITION_RATIO, max(0.05, position)),
+            "min_cash_reserve_ratio": min(0.9, max(0.0, cash)),
+            "max_trades_per_day": float(min(HARD_MAX_TRADES_PER_DAY, max(1, trades))),
+            "slippage": min(0.02, max(0.0, slippage)),
+        }
+
+    def _risk_summary(self) -> str:
+        """给状态回执用的一句话档位说明。"""
+
+        try:
+            profile = self._risk_profile()
+            limits = self._effective_limits()
+        except RuntimeError as exc:
+            return f"风险档配置有问题：{exc}"
+        return (
+            f"风险档：{profile['label']}（单票≤{limits['max_position_ratio']:.0%}，"
+            f"现金≥{limits['min_cash_reserve_ratio']:.0%}，每日≤{int(limits['max_trades_per_day'])} 笔）"
+        )
 
     # ──── 手动看盘的闸门 ────
 
@@ -609,6 +708,9 @@ class SimTraderPlugin(MaiBotPlugin):
             idle_note=self._idle_note(state, now.strftime("%Y-%m-%d")),
             bot_name=self._bot_name or DEFAULT_BOT_NAME,
             persona=self._bot_persona,
+            risk_style=str(self._risk_profile()["style"]),
+            max_position_pct=f"{self._effective_limits()['max_position_ratio']:.0%}",
+            min_cash_pct=f"{self._effective_limits()['min_cash_reserve_ratio']:.0%}",
         )
         result = await self._llm_generate(
             messages=messages,
@@ -675,16 +777,21 @@ class SimTraderPlugin(MaiBotPlugin):
 
         total_assets = _to_float(balance.get("totalAssets"))
         available_cash = _to_float(balance.get("availBalance"))
+        # 风险档在这里落到具体数字上：档位只调倍数，绝对上限仍由代码夹住
+        limits = self._effective_limits()
 
         for action in decision.actions:
-            if traded_today >= self.config.account.max_trades_per_day:
-                notes.append(f"今天已经下过 {traded_today} 笔，这笔 {action.code} 先忍住")
+            if traded_today >= limits["max_trades_per_day"]:
+                notes.append(
+                    f"今天已经下过 {traded_today} 笔，这笔 {action.code} 先忍住"
+                    f"（风险档上限 {int(limits['max_trades_per_day'])} 笔）"
+                )
                 break
             quote = quotes.get(action.code)
             if quote is None:
                 notes.append(f"{action.name}({action.code}) 没有行情，跳过")
                 continue
-            price = limit_price(quote.price, direction=action.action, slippage=self.config.account.slippage)
+            price = limit_price(quote.price, direction=action.action, slippage=limits["slippage"])
             holding = find_holding(positions, action.code)
             if action.action == "buy":
                 position_value = holding.market_value if holding else 0.0
@@ -694,8 +801,8 @@ class SimTraderPlugin(MaiBotPlugin):
                     available_cash=available_cash,
                     total_assets=total_assets,
                     current_position_value=position_value,
-                    max_position_ratio=self.config.account.max_position_ratio,
-                    min_cash_reserve_ratio=self.config.account.min_cash_reserve_ratio,
+                    max_position_ratio=limits["max_position_ratio"],
+                    min_cash_reserve_ratio=limits["min_cash_reserve_ratio"],
                 )
                 if quantity is None:
                     notes.append(f"想买 {action.name}，但资金或仓位不够，没买")
@@ -1013,7 +1120,9 @@ class SimTraderPlugin(MaiBotPlugin):
             holdings = parse_holdings(await mx.get_positions())
         except Exception as exc:
             return f"读账户失败：{exc}"
-        return "\n".join(build_snapshot_lines(balance, list(holdings.values())))
+        lines = build_snapshot_lines(balance, list(holdings.values()))
+        lines.append(self._risk_summary())
+        return "\n".join(lines)
 
     async def _send_status(self, stream_id: str) -> None:
         """回一条账户现状。"""

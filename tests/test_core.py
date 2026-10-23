@@ -225,6 +225,46 @@ class DecisionTests(unittest.TestCase):
             parse_decision("我觉得今天不太行")
 
 
+class DecisionPromptTests(unittest.TestCase):
+    """决策 prompt 里的风控数字必须来自配置，不能写死。"""
+
+    @staticmethod
+    def _messages(**overrides):
+        kwargs = dict(
+            now_text="09:35",
+            session_label="测试组合",
+            balance={"totalAssets": 1000000, "availBalance": 900000},
+            positions=[],
+            pool_lines=["601899 紫金矿业"],
+            pending_orders=[],
+            recent_notes=[],
+        )
+        kwargs.update(overrides)
+        return DECISION.build_messages(**kwargs)
+
+    def test_default_limits_are_20_percent(self) -> None:
+        system_text = self._messages()[0]["content"]
+        self.assertIn("单票仓位不超过总资产的 20%", system_text)
+        self.assertIn("至少要留 20% 现金", system_text)
+
+    def test_limits_come_from_caller(self) -> None:
+        """配置改成 35% / 5% 时，prompt 里不能还是 20%。"""
+
+        system_text = self._messages(max_position_pct="35%", min_cash_pct="5%")[0]["content"]
+        self.assertIn("单票仓位不超过总资产的 35%", system_text)
+        self.assertIn("至少要留 5% 现金", system_text)
+        self.assertNotIn("不超过总资产的 20%", system_text)
+
+    def test_risk_style_is_appended(self) -> None:
+        system_text = self._messages(risk_style="这一轮按梭哈档来。")[0]["content"]
+        self.assertIn("【这一轮的风格】", system_text)
+        self.assertIn("梭哈档", system_text)
+
+    def test_no_risk_style_keeps_prompt_clean(self) -> None:
+        system_text = self._messages()[0]["content"]
+        self.assertNotIn("【这一轮的风格】", system_text)
+
+
 class WatchlistTests(unittest.TestCase):
     """股票池增删与落盘。"""
 

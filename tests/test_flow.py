@@ -687,5 +687,82 @@ class ManualTriggerGateTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(plugin._busy)
 
 
+class RiskProfileTests(unittest.IsolatedAsyncioTestCase):
+    """风险档：倍数叠加、绝对上限夹取、状态回执。"""
+
+    async def test_default_profile_keeps_original_numbers(self) -> None:
+        """默认档（稳健）必须等于原来的行为，老用户升级后不该变。"""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            plugin = build_plugin(Path(tmp))
+
+            limits = plugin._effective_limits()
+
+            self.assertEqual(plugin.config.risk.profile, "steady")
+            self.assertAlmostEqual(limits["max_position_ratio"], 0.2)
+            self.assertAlmostEqual(limits["min_cash_reserve_ratio"], 0.2)
+            self.assertEqual(limits["max_trades_per_day"], 6)
+            self.assertAlmostEqual(limits["slippage"], 0.003)
+
+    async def test_aggressive_and_yolo_scale_up(self) -> None:
+        """激进 / 梭哈 按倍数放大，且方向正确。"""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            plugin = build_plugin(Path(tmp))
+
+            plugin.config.risk.profile = "aggressive"
+            aggressive = plugin._effective_limits()
+            plugin.config.risk.profile = "yolo"
+            yolo = plugin._effective_limits()
+
+            self.assertGreater(aggressive["max_position_ratio"], 0.2)
+            self.assertLess(aggressive["min_cash_reserve_ratio"], 0.2)
+            self.assertGreater(yolo["max_position_ratio"], aggressive["max_position_ratio"])
+            self.assertLess(yolo["min_cash_reserve_ratio"], aggressive["min_cash_reserve_ratio"])
+
+    async def test_hard_caps_clamp_extremes(self) -> None:
+        """用户把基数调到天上，档位也不能突破代码里的绝对上限。"""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            plugin = build_plugin(Path(tmp))
+            plugin.config.risk.profile = "yolo"
+            plugin.config.account.max_position_ratio = 1.0
+            plugin.config.account.max_trades_per_day = 30
+            plugin.config.account.min_cash_reserve_ratio = 0.0
+            plugin.config.account.slippage = 0.02
+
+            limits = plugin._effective_limits()
+
+            self.assertAlmostEqual(limits["max_position_ratio"], PLUGIN_MODULE.HARD_MAX_POSITION_RATIO)
+            self.assertEqual(limits["max_trades_per_day"], PLUGIN_MODULE.HARD_MAX_TRADES_PER_DAY)
+            self.assertAlmostEqual(limits["min_cash_reserve_ratio"], 0.0)
+            self.assertAlmostEqual(limits["slippage"], 0.02)
+
+    async def test_unknown_profile_raises(self) -> None:
+        """写错档位名直接报错，不静默退回默认。"""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            plugin = build_plugin(Path(tmp))
+            plugin.config.risk.profile = "疯狂"
+
+            with self.assertRaises(RuntimeError) as raised:
+                plugin._effective_limits()
+
+            self.assertIn("risk", str(raised.exception))
+
+    async def test_status_summary_shows_profile(self) -> None:
+        """状态回执里要写清当前档位与实际限制。"""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            plugin = build_plugin(Path(tmp))
+            plugin.config.risk.profile = "yolo"
+
+            summary = plugin._risk_summary()
+
+            self.assertIn("梭哈", summary)
+            self.assertIn("单票≤", summary)
+            self.assertIn("每日≤", summary)
+
+
 if __name__ == "__main__":
     unittest.main()
