@@ -17,6 +17,7 @@ import time
 from maibot_sdk import Command, Field, MaiBotPlugin, PluginConfigBase, Tool
 from maibot_sdk.types import ToolParameterInfo, ToolParamType
 
+from .config_ui import build_config_ui_schema
 from .decision import Decision, build_messages, parse_decision
 from .mx_client import DEFAULT_BASE_URL, MxApiError, MxClient
 from .positions import Holding, find_holding, parse_holdings
@@ -44,7 +45,7 @@ class PluginSectionConfig(PluginConfigBase):
     __ui_order__ = 0
 
     enabled: bool = Field(default=True, description="是否启用插件")
-    config_version: str = Field(default="0.7.0", description="配置版本")
+    config_version: str = Field(default="0.7.1", description="配置版本")
 
 
 class MxSectionConfig(PluginConfigBase):
@@ -268,6 +269,12 @@ class SimTraderPlugin(MaiBotPlugin):
     """模拟盘插件。"""
 
     config_model = SimTraderConfig
+
+    @classmethod
+    def build_config_schema(cls, **plugin_info: str) -> Dict[str, Any]:
+        """只重组 WebUI 的展示结构，配置模型与 TOML 路径保持不变。"""
+
+        return build_config_ui_schema(super().build_config_schema(**plugin_info))
 
     def __init__(self) -> None:
         super().__init__()

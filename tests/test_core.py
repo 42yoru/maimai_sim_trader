@@ -43,6 +43,7 @@ TRADING = sys.modules[f"{MODULE_NAME}.trading"]
 WATCHLIST = sys.modules[f"{MODULE_NAME}.watchlist"]
 POSITIONS = sys.modules[f"{MODULE_NAME}.positions"]
 QUERY_ARGS = sys.modules[f"{MODULE_NAME}.query_args"]
+PLUGIN_MODULE = sys.modules[MODULE_NAME]
 
 DecisionParseError = DECISION.DecisionParseError
 parse_decision = DECISION.parse_decision
@@ -263,6 +264,55 @@ class DecisionPromptTests(unittest.TestCase):
     def test_no_risk_style_keeps_prompt_clean(self) -> None:
         system_text = self._messages()[0]["content"]
         self.assertNotIn("【这一轮的风格】", system_text)
+
+
+class ConfigUiSchemaTests(unittest.TestCase):
+    """WebUI 配置页：中文标签、页签、不丢字段。"""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.raw = PLUGIN_MODULE.SimTraderPlugin.build_config_schema(
+            plugin_id="github.42yoru.maimai-sim-trader",
+            plugin_name="麦麦模拟盘",
+            plugin_version="0.7.0",
+            plugin_description="",
+            plugin_author="42yoru",
+        )
+
+    def test_layout_is_tabs(self) -> None:
+        layout = self.raw["layout"]
+        self.assertEqual(layout["type"], "tabs")
+        tab_titles = [tab["title"] for tab in layout["tabs"]]
+        self.assertEqual(tab_titles, ["常用设置", "交易", "模型", "高级"])
+
+    def test_no_config_field_is_dropped(self) -> None:
+        """每个真实配置节里的每个字段，都必须出现在重组后的 schema 里。"""
+
+        dumped = PLUGIN_MODULE.SimTraderConfig().model_dump()
+        expected = {section: set(fields) for section, fields in dumped.items()}
+
+        covered = {}
+        for block in self.raw["sections"].values():
+            covered.setdefault(block["name"], set()).update(block["fields"])
+
+        self.assertEqual(set(covered), set(expected))
+        for section_name, fields in expected.items():
+            self.assertEqual(covered[section_name], fields, f"{section_name} 的字段被漏掉了")
+
+    def test_labels_are_chinese(self) -> None:
+        for block in self.raw["sections"].values():
+            for field_name, field in block["fields"].items():
+                self.assertNotEqual(field["label"], field_name, f"{field_name} 没有中文标签")
+
+    def test_secret_and_readonly_and_choices(self) -> None:
+        mx = self.raw["sections"]["mx"]["fields"]
+        self.assertEqual(mx["api_key"]["ui_type"], "password")
+
+        plugin_block = self.raw["sections"]["plugin_info"]["fields"]
+        self.assertTrue(plugin_block["config_version"]["disabled"])
+
+        risk = self.raw["sections"]["risk"]["fields"]
+        self.assertEqual(risk["profile"]["choices"], ["steady", "aggressive", "yolo"])
 
 
 class WatchlistTests(unittest.TestCase):
