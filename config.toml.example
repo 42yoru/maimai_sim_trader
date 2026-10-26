@@ -1,6 +1,6 @@
 [plugin]
 enabled = true
-config_version = "0.7.1"
+config_version = "0.7.2"
 
 [mx]
 # 东方财富妙想 API Key，mkt_v_ 开头；留空则读环境变量 MX_APIKEY
@@ -27,6 +27,7 @@ max_trades_per_day = 6
 #   aggressive = 激进（单票放宽到 1.4 倍、现金底线降到一半、每日笔数 1.8 倍、让价 +0.1%）
 #   yolo       = 梭哈（单票 1.8 倍、现金 0.1 倍、笔数 2 倍、让价 +0.2%）
 # 档位只是在上面的数字上乘倍数，代码里还有绝对上限（单票 ≤40%、每日 ≤12 笔）。
+# 决策 prompt 里会同时给出这一轮实际剩余的额度（单票余量、仓位余量、还能下几笔）。
 # 写错了会直接报错，不会静默退回默认档。
 profile = "steady"
 

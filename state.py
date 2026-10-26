@@ -14,11 +14,67 @@ from datetime import date
 from pathlib import Path
 
 STATE_VERSION = 1
-MAX_NOTES = 8
+MAX_ROUND_RECORDS = 24
+MAX_ROUND_ACTIONS = 6
+HISTORY_IN_PROMPT = 8
 
 
 class StateError(RuntimeError):
     """状态文件损坏或版本不符。"""
+
+
+@dataclass
+class RoundRecord:
+    """一轮决策留下的结论，供后续轮次参考。
+
+    只记「当时怎么想、做了什么」，行情每次现查，避免长在状态里过期。
+    """
+
+    at: str = ""
+    """决策时间，形如 `10-24 14:20`。"""
+
+    mood: str = ""
+    """当时的心情。"""
+
+    reasoning: str = ""
+    """当时的判断理由。"""
+
+    actions: List[str] = field(default_factory=list)
+    """这一轮实际执行/被拦下的动作，一行一条。"""
+
+    def to_dict(self) -> Dict[str, Any]:
+        """序列化。"""
+
+        return {
+            "at": self.at,
+            "mood": self.mood,
+            "reasoning": self.reasoning,
+            "actions": list(self.actions),
+        }
+
+    @classmethod
+    def from_dict(cls, raw: Dict[str, Any]) -> "RoundRecord":
+        """反序列化；缺字段按空处理，类型不对直接报错。"""
+
+        actions = raw.get("actions") or []
+        if not isinstance(actions, list):
+            raise StateError("round_records.actions 不是数组")
+        return cls(
+            at=str(raw.get("at") or ""),
+            mood=str(raw.get("mood") or ""),
+            reasoning=str(raw.get("reasoning") or ""),
+            actions=[str(item) for item in actions],
+        )
+
+    def to_prompt_block(self) -> str:
+        """渲染成给模型看的小块：时间、心情、判断、动作。"""
+
+        head = f"{self.at}｜心情：{self.mood or '平静'}" if self.at else f"心情：{self.mood or '平静'}"
+        lines = [head]
+        if self.reasoning:
+            lines.append(f"判断：{self.reasoning}")
+        lines.append("动作：" + ("；".join(self.actions) if self.actions else "没动"))
+        return "\n".join(lines)
 
 
 @dataclass
@@ -32,7 +88,7 @@ class RuntimeState:
     last_mood: str = ""
     last_reasoning: str = ""
     empty_since: str = ""
-    recent_notes: List[str] = field(default_factory=list)
+    round_records: List[RoundRecord] = field(default_factory=list)
     reported_dates: List[str] = field(default_factory=list)
 
     def roll_date(self, today: str) -> bool:
@@ -67,16 +123,15 @@ class RuntimeState:
             return 0
         return max(0, (current - start).days + 1)
 
-    def record_round(self, *, note: str, mood: str, reasoning: str, trade_count: int) -> None:
+    def record_round(self, *, record: RoundRecord, trade_count: int) -> None:
         """记下一轮的结论，供后续 prompt 使用。"""
 
         self.check_count += 1
         self.trade_count += trade_count
-        self.last_mood = mood
-        self.last_reasoning = reasoning
-        if note:
-            self.recent_notes.append(note)
-            self.recent_notes = self.recent_notes[-MAX_NOTES:]
+        self.last_mood = record.mood
+        self.last_reasoning = record.reasoning
+        self.round_records.append(record)
+        self.round_records = self.round_records[-MAX_ROUND_RECORDS:]
 
     def mark_reported(self, today: str) -> None:
         """记下今天已经播报过，避免重复发收盘复盘。"""
@@ -97,20 +152,37 @@ class RuntimeState:
             "last_mood": self.last_mood,
             "last_reasoning": self.last_reasoning,
             "empty_since": self.empty_since,
-            "recent_notes": list(self.recent_notes),
+            "round_records": [record.to_dict() for record in self.round_records],
             "reported_dates": list(self.reported_dates),
         }
 
     @classmethod
     def from_dict(cls, raw: Dict[str, Any]) -> "RuntimeState":
-        """反序列化；字段类型不对就报错。"""
+        """反序列化；字段类型不对就报错。
+
+        老状态文件只有 `recent_notes` 这一串一行记录，这里顺手迁移成结构化记录，
+        避免升级后历史直接消失。
+        """
 
         version = raw.get("version")
         if version != STATE_VERSION:
             raise StateError(f"状态文件版本不匹配（期望 {STATE_VERSION}，实际 {version}）")
-        notes = raw.get("recent_notes") or []
-        if not isinstance(notes, list):
-            raise StateError("recent_notes 不是数组")
+        raw_records = raw.get("round_records")
+        if raw_records is None:
+            # 兼容旧格式：`14:31 没动` 这种一行记录本来就没有判断理由，
+            # 直接放进 actions，别硬凑成「判断：14:31 没动 / 动作：没动」
+            legacy_notes = raw.get("recent_notes") or []
+            if not isinstance(legacy_notes, list):
+                raise StateError("recent_notes 不是数组")
+            records = [
+                RoundRecord(actions=[str(item).strip()])
+                for item in legacy_notes
+                if str(item).strip()
+            ]
+        else:
+            if not isinstance(raw_records, list):
+                raise StateError("round_records 不是数组")
+            records = [RoundRecord.from_dict(item) for item in raw_records]
         return cls(
             trade_date=str(raw.get("trade_date") or ""),
             check_count=int(raw.get("check_count") or 0),
@@ -119,7 +191,7 @@ class RuntimeState:
             last_mood=str(raw.get("last_mood") or ""),
             last_reasoning=str(raw.get("last_reasoning") or ""),
             empty_since=str(raw.get("empty_since") or ""),
-            recent_notes=[str(item) for item in notes],
+            round_records=records,
             reported_dates=[str(item) for item in (raw.get("reported_dates") or [])],
         )
 
@@ -168,4 +240,13 @@ class StateStore:
         os.replace(tmp_path, self._path)
 
 
-__all__ = ["MAX_NOTES", "STATE_VERSION", "RuntimeState", "StateError", "StateStore"]
+__all__ = [
+    "HISTORY_IN_PROMPT",
+    "MAX_ROUND_ACTIONS",
+    "MAX_ROUND_RECORDS",
+    "STATE_VERSION",
+    "RoundRecord",
+    "RuntimeState",
+    "StateError",
+    "StateStore",
+]

@@ -238,7 +238,7 @@ class DecisionPromptTests(unittest.TestCase):
             positions=[],
             pool_lines=["601899 紫金矿业"],
             pending_orders=[],
-            recent_notes=[],
+            history_blocks=[],
         )
         kwargs.update(overrides)
         return DECISION.build_messages(**kwargs)
@@ -264,6 +264,109 @@ class DecisionPromptTests(unittest.TestCase):
     def test_no_risk_style_keeps_prompt_clean(self) -> None:
         system_text = self._messages()[0]["content"]
         self.assertNotIn("【这一轮的风格】", system_text)
+
+    def test_history_blocks_are_injected(self) -> None:
+        """上一轮的判断和动作必须进这一轮的 prompt。"""
+
+        block = STATE.RoundRecord(
+            at="10-24 14:20",
+            mood="谨慎",
+            reasoning="缩量阴跌，先不动",
+            actions=["想买 600519，但资金不够，没买"],
+        ).to_prompt_block()
+        user_text = self._messages(history_blocks=[block])[1]["content"]
+        self.assertIn("【最近几轮", user_text)
+        self.assertIn("10-24 14:20｜心情：谨慎", user_text)
+        self.assertIn("判断：缩量阴跌，先不动", user_text)
+        self.assertIn("动作：想买 600519，但资金不够，没买", user_text)
+
+    def test_empty_history_says_first_round(self) -> None:
+        user_text = self._messages(history_blocks=[])[1]["content"]
+        self.assertIn("（这是第一轮）", user_text)
+
+    def test_limits_block_is_rendered(self) -> None:
+        user_text = self._messages(limits_block=["- 今天已下 3 笔，上限 12 笔，还能下 9 笔"])[1]["content"]
+        self.assertIn("【这一轮的额度】", user_text)
+        self.assertIn("还能下 9 笔", user_text)
+
+    def test_limits_block_is_optional(self) -> None:
+        user_text = self._messages()[1]["content"]
+        self.assertNotIn("【这一轮的额度】", user_text)
+
+    def test_position_pct_uses_reported_value(self) -> None:
+        user_text = self._messages(balance={"totalAssets": 500000.0, "totalPosPct": 12.5})[1]["content"]
+        self.assertIn("仓位 12.50%", user_text)
+
+    def test_position_pct_falls_back_to_holdings(self) -> None:
+        """妙想不给 totalPosPct 时用持仓市值算，别让 prompt 里一半是「未知」。"""
+
+        holding = POSITIONS.Holding(
+            code="600519",
+            name="贵州茅台",
+            quantity=100,
+            available=100,
+            avg_cost=1.0,
+            current_price=2000.0,
+            market_value=200000.0,
+            profit=0.0,
+        )
+        user_text = self._messages(
+            balance={"totalAssets": 500000.0, "availBalance": 300000.0},
+            positions=[holding],
+        )[1]["content"]
+        self.assertIn("仓位 40.00%", user_text)
+        self.assertNotIn("仓位 未知", user_text)
+
+
+class LimitsBlockTests(unittest.TestCase):
+    """额度块：数字必须来自实际持仓和当日笔数。"""
+
+    @staticmethod
+    def _holding(code: str, name: str, market_value: float) -> Any:
+        return POSITIONS.Holding(
+            code=code,
+            name=name,
+            quantity=100,
+            available=100,
+            avg_cost=1.0,
+            current_price=1.0,
+            market_value=market_value,
+            profit=0.0,
+        )
+
+    def test_block_reports_remaining_room(self) -> None:
+        lines = PLUGIN_MODULE.build_limits_block(
+            limits={"max_position_ratio": 0.36, "min_cash_reserve_ratio": 0.02, "max_trades_per_day": 12},
+            balance={"totalAssets": 500000},
+            positions=[self._holding("600519", "贵州茅台", 160000), self._holding("300750", "宁德时代", 46500)],
+            trades_used=3,
+        )
+        text = "\n".join(lines)
+        self.assertIn("单票上限 36%", text)
+        self.assertIn("贵州茅台(600519) 占 32.0%", text)
+        self.assertIn("还能再加", text)
+        self.assertIn("今天已下 3 笔，上限 12 笔，还能下 9 笔", text)
+
+    def test_empty_position_still_reports_caps(self) -> None:
+        lines = PLUGIN_MODULE.build_limits_block(
+            limits={"max_position_ratio": 0.2, "min_cash_reserve_ratio": 0.2, "max_trades_per_day": 6},
+            balance={"totalAssets": 100000},
+            positions=[],
+            trades_used=0,
+        )
+        text = "\n".join(lines)
+        self.assertIn("现在空仓", text)
+        self.assertIn("总仓位上限 80%", text)
+        self.assertIn("还能下 6 笔", text)
+
+    def test_trades_left_never_negative(self) -> None:
+        lines = PLUGIN_MODULE.build_limits_block(
+            limits={"max_position_ratio": 0.2, "min_cash_reserve_ratio": 0.2, "max_trades_per_day": 6},
+            balance={"totalAssets": 100000},
+            positions=[],
+            trades_used=9,
+        )
+        self.assertIn("还能下 0 笔", "\n".join(lines))
 
 
 class ConfigUiSchemaTests(unittest.TestCase):
@@ -457,13 +560,76 @@ class StateTests(unittest.TestCase):
             path = Path(tmp) / "state.json"
             store = StateStore(path)
             state = store.load()
-            state.record_round(note="10:00 没动", mood="平静", reasoning="等着", trade_count=0)
+            state.record_round(
+                record=STATE.RoundRecord(
+                    at="10-19 10:00",
+                    mood="平静",
+                    reasoning="等着",
+                    actions=["想买 600519，但资金不够，没买"],
+                ),
+                trade_count=0,
+            )
             state.next_check_at = 123.0
             store.save()
             reloaded = StateStore(path).load()
             self.assertEqual(reloaded.check_count, 1)
-            self.assertEqual(reloaded.recent_notes, ["10:00 没动"])
             self.assertEqual(reloaded.next_check_at, 123.0)
+            self.assertEqual(len(reloaded.round_records), 1)
+            record = reloaded.round_records[0]
+            self.assertEqual(record.at, "10-19 10:00")
+            self.assertEqual(record.mood, "平静")
+            self.assertEqual(record.reasoning, "等着")
+            self.assertEqual(record.actions, ["想买 600519，但资金不够，没买"])
+
+    def test_legacy_recent_notes_are_migrated(self) -> None:
+        """老状态文件里的 recent_notes 升级后不能丢。"""
+
+        legacy = {
+            "version": STATE.STATE_VERSION,
+            "trade_date": "2026-10-19",
+            "recent_notes": ["10:00 没动", "10:30 动了 1 笔"],
+        }
+        state = RuntimeState.from_dict(legacy)
+        self.assertEqual(
+            [record.actions for record in state.round_records],
+            [["10:00 没动"], ["10:30 动了 1 笔"]],
+        )
+        self.assertEqual([record.reasoning for record in state.round_records], ["", ""])
+
+    def test_round_records_are_capped(self) -> None:
+        state = RuntimeState()
+        for index in range(STATE.MAX_ROUND_RECORDS + 5):
+            state.record_round(
+                record=STATE.RoundRecord(at=f"10-19 10:{index:02d}", mood="平静", reasoning=f"第 {index} 轮"),
+                trade_count=0,
+            )
+        self.assertEqual(len(state.round_records), STATE.MAX_ROUND_RECORDS)
+        self.assertEqual(state.round_records[-1].reasoning, f"第 {STATE.MAX_ROUND_RECORDS + 4} 轮")
+
+    def test_reasoning_survives_day_rollover(self) -> None:
+        """跨日只清当日计数，历史记录得留着，不然「过去」就断了。"""
+
+        state = RuntimeState(trade_date="2026-10-18")
+        state.record_round(
+            record=STATE.RoundRecord(at="10-18 10:00", mood="谨慎", reasoning="等回调"),
+            trade_count=0,
+        )
+        state.roll_date("2026-10-19")
+        self.assertEqual(state.last_reasoning, "")
+        self.assertEqual(len(state.round_records), 1)
+        self.assertEqual(state.round_records[0].reasoning, "等回调")
+
+    def test_round_record_rejects_bad_actions(self) -> None:
+        with self.assertRaises(STATE.StateError):
+            STATE.RoundRecord.from_dict({"at": "10-19 10:00", "actions": "不是数组"})
+
+    def test_prompt_block_without_time_still_renders(self) -> None:
+        """老数据没有时间戳，也不能渲染出个空字符串。"""
+
+        block = STATE.RoundRecord(reasoning="10:00 没动").to_prompt_block()
+        self.assertIn("心情：平静", block)
+        self.assertIn("判断：10:00 没动", block)
+        self.assertIn("动作：没动", block)
 
     def test_empty_days_tracking(self) -> None:
         state = RuntimeState()

@@ -24,7 +24,7 @@ from .positions import Holding, find_holding, parse_holdings
 from .query_args import QueryParseError, parse_rate_argument, parse_stock_query
 from .quotes import Quote, TencentQuoteClient
 from .report import build_plain_fallback, build_report_messages, build_snapshot_lines
-from .state import RuntimeState, StateStore
+from .state import HISTORY_IN_PROMPT, MAX_ROUND_ACTIONS, RoundRecord, RuntimeState, StateStore
 from .trading import LOT_SIZE, check_sell, limit_price, resolve_quantity
 from .watchlist import WatchlistStore, is_valid_code
 
@@ -32,6 +32,7 @@ LOGGER_NAME = "maimai.sim-trader"
 DEFAULT_BOT_NAME = "麦麦"
 DEFAULT_SESSIONS = ("09:30-11:30", "13:00-15:00")
 TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
+RECORDS_IN_HISTORY_REPLY = 6
 
 
 # ──── 配置模型 ────
@@ -45,7 +46,7 @@ class PluginSectionConfig(PluginConfigBase):
     __ui_order__ = 0
 
     enabled: bool = Field(default=True, description="是否启用插件")
-    config_version: str = Field(default="0.7.1", description="配置版本")
+    config_version: str = Field(default="0.7.2", description="配置版本")
 
 
 class MxSectionConfig(PluginConfigBase):
@@ -205,7 +206,10 @@ RISK_PROFILES: Dict[str, Dict[str, Any]] = {
         "cash_multiplier": 1.0,
         "trades_multiplier": 1.0,
         "slippage_delta": 0.0,
-        "style": "这一轮按稳健档来：先想最坏情况，宁可错过也别追高；没把握就空着，等更清楚的机会。",
+        "style": (
+            "这一轮按稳健档来：许可窄、额度小，只有理由清楚到能一句话讲明白才动手；"
+            "没把握就空着，空着不算失职，宁可少动也别追高、别补跌。"
+        ),
     },
     "aggressive": {
         "label": "激进",
@@ -213,7 +217,10 @@ RISK_PROFILES: Dict[str, Dict[str, Any]] = {
         "cash_multiplier": 0.5,
         "trades_multiplier": 1.8,
         "slippage_delta": 0.001,
-        "style": "这一轮按激进档来：看得顺眼就上，允许比平时更集中、更频繁，但每笔都要说得出理由。",
+        "style": (
+            "这一轮按激进档来：额度放宽了，能动的笔数也更多，允许比平时更集中；"
+            "看到机会不用等它完美，但每笔都要说得出「为什么是现在」，说不出来就别动。"
+        ),
     },
     "yolo": {
         "label": "梭哈",
@@ -222,8 +229,8 @@ RISK_PROFILES: Dict[str, Dict[str, Any]] = {
         "trades_multiplier": 2.0,
         "slippage_delta": 0.002,
         "style": (
-            "这一轮按梭哈档来：想干就干，允许重仓、允许试错，反正亏的也是模拟盘；"
-            "但别把话说满，也别为了热闹硬凑交易。"
+            "这一轮按梭哈档来：额度几乎拉满，允许重仓、允许看错，亏的也是模拟盘，图的就是这个；"
+            "想干就干，但别为了凑热闹硬编理由，也别把话说满——亏了要认。"
         ),
     },
 }
@@ -610,9 +617,7 @@ class SimTraderPlugin(MaiBotPlugin):
                 min(self.config.schedule.max_interval_minutes, decision.next_check_minutes),
             )
             state.record_round(
-                note=self._round_note(now, decision.actions, executed),
-                mood=decision.mood,
-                reasoning=decision.reasoning,
+                record=self._round_record(now, decision, round_notes),
                 trade_count=executed,
             )
             if executed > 0:
@@ -704,6 +709,8 @@ class SimTraderPlugin(MaiBotPlugin):
             f"@{row.get('price') or row.get('orderPrice') or ''} 状态{row.get('status') or ''}"
             for row in orders
         ]
+        # 档位算出来的限制只算一次，额度块和规则里的数字必须同源
+        limits = self._effective_limits()
         messages = build_messages(
             now_text=now.strftime(TIME_FORMAT),
             session_label=self._account_label(balance),
@@ -711,13 +718,19 @@ class SimTraderPlugin(MaiBotPlugin):
             positions=positions,
             pool_lines=pool_lines,
             pending_orders=pending,
-            recent_notes=state.recent_notes,
+            history_blocks=self._history_blocks(state),
+            limits_block=build_limits_block(
+                limits=limits,
+                balance=balance,
+                positions=positions,
+                trades_used=state.trade_count,
+            ),
             idle_note=self._idle_note(state, now.strftime("%Y-%m-%d")),
             bot_name=self._bot_name or DEFAULT_BOT_NAME,
             persona=self._bot_persona,
             risk_style=str(self._risk_profile()["style"]),
-            max_position_pct=f"{self._effective_limits()['max_position_ratio']:.0%}",
-            min_cash_pct=f"{self._effective_limits()['min_cash_reserve_ratio']:.0%}",
+            max_position_pct=f"{limits['max_position_ratio']:.0%}",
+            min_cash_pct=f"{limits['min_cash_reserve_ratio']:.0%}",
         )
         result = await self._llm_generate(
             messages=messages,
@@ -873,14 +886,25 @@ class SimTraderPlugin(MaiBotPlugin):
             return ""
         return f"已经连续空仓 {days} 天（从 {state.empty_since} 起）"
 
-    def _round_note(self, now: datetime, actions: Sequence[Any], executed: int) -> str:
-        """给后续 prompt 用的一行记录。"""
+    def _round_record(self, now: datetime, decision: Decision, round_notes: Sequence[str]) -> RoundRecord:
+        """把这一轮整理成给后续轮次参考的记录。
 
-        if executed:
-            return f"{now.strftime('%H:%M')} 动了 {executed} 笔"
-        if actions:
-            return f"{now.strftime('%H:%M')} 想动但没成"
-        return f"{now.strftime('%H:%M')} 没动"
+        判断只留模型自己写的 reasoning，动作只留实际发生或被拦下的行，
+        这样下一轮能看到「上次怎么想、后来怎么落地的」，而不是一串孤立的成交。
+        """
+
+        actions = [str(line).strip() for line in round_notes if str(line).strip()]
+        return RoundRecord(
+            at=now.strftime("%m-%d %H:%M"),
+            mood=decision.mood,
+            reasoning=decision.reasoning,
+            actions=actions[:MAX_ROUND_ACTIONS],
+        )
+
+    def _history_blocks(self, state: RuntimeState) -> List[str]:
+        """把最近几轮渲染成决策 prompt 里的块，越靠下越新。"""
+
+        return [record.to_prompt_block() for record in state.round_records[-HISTORY_IN_PROMPT:]]
 
     # ──── 播报 ────
 
@@ -1177,21 +1201,18 @@ class SimTraderPlugin(MaiBotPlugin):
         await self._send(stream_id, await self._build_orders_text())
 
     def _build_history_text(self) -> str:
-        """最近几轮的判断记录。"""
+        """最近几轮判断与动作，按时间从早到晚。"""
 
         state = self._require_state().load()
         lines = [f"今天看了 {state.check_count} 轮，动了 {state.trade_count} 笔"]
-        if state.last_mood:
-            lines.append(f"最近心情：{state.last_mood}")
-        if state.last_reasoning:
-            lines.append(f"最近判断：{state.last_reasoning}")
         if state.empty_since:
             lines.append(f"从 {state.empty_since} 起一直空仓")
-        if state.recent_notes:
-            lines.append("最近几轮：")
-            lines.extend(f"· {note}" for note in state.recent_notes[-6:])
-        else:
+        if not state.round_records:
             lines.append("还没有记录，等她跑过一轮再来看。")
+            return "\n".join(lines)
+        lines.append("最近几轮（越靠下越新）：")
+        for record in state.round_records[-RECORDS_IN_HISTORY_REPLY:]:
+            lines.append("· " + record.to_prompt_block().replace("\n", " / "))
         return "\n".join(lines)
 
     async def _send_history(self, stream_id: str) -> None:
@@ -1399,6 +1420,46 @@ def _to_float(value: Any) -> float:
         return float(value)
     except (TypeError, ValueError):
         return 0.0
+
+
+def build_limits_block(
+    *,
+    limits: Dict[str, float],
+    balance: Dict[str, Any],
+    positions: Sequence[Holding],
+    trades_used: int,
+) -> List[str]:
+    """把这一轮还剩的额度算成人话：单票余量、总仓位余量、今天还能下几笔。
+
+    让模型自己从「单票不超过 36%」推算「现在还能加多少」很容易算错，
+    不如直接把数字摆出来，它只需要决定用不用。
+    """
+
+    single_cap = float(limits["max_position_ratio"])
+    cash_floor = float(limits["min_cash_reserve_ratio"])
+    trades_cap = int(limits["max_trades_per_day"])
+    total_assets = _to_float(balance.get("totalAssets"))
+
+    lines: List[str] = []
+    if total_assets > 0 and positions:
+        heaviest = max(positions, key=lambda item: item.market_value)
+        held_total = sum(item.market_value for item in positions)
+        held_pct = held_total / total_assets
+        lines.append(
+            f"- 单票上限 {single_cap:.0%}；现在最重的一只 {heaviest.name}({heaviest.code}) "
+            f"占 {heaviest.market_value / total_assets:.1%}"
+        )
+        lines.append(
+            f"- 总仓位上限 {1 - cash_floor:.0%}（现金至少留 {cash_floor:.0%}），"
+            f"现在 {held_pct:.1%}，还能再加 {max(0.0, 1 - cash_floor - held_pct):.1%}"
+        )
+    else:
+        lines.append(f"- 单票上限 {single_cap:.0%}；现在空仓")
+        lines.append(f"- 总仓位上限 {1 - cash_floor:.0%}（现金至少留 {cash_floor:.0%}）")
+    lines.append(
+        f"- 今天已下 {trades_used} 笔，上限 {trades_cap} 笔，还能下 {max(0, trades_cap - trades_used)} 笔"
+    )
+    return lines
 
 
 def create_plugin() -> SimTraderPlugin:

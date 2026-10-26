@@ -12,7 +12,7 @@ from typing import Any, Dict, List, Sequence, Tuple
 import json
 import re
 
-from .fmt import account_profit, money, pct, price, ratio
+from .fmt import UNKNOWN, account_profit, money, pct, price, ratio, to_float
 from .positions import Holding
 
 MAX_ACTIONS = 3
@@ -69,6 +69,7 @@ SYSTEM_PROMPT = """{header}
 1. 只能买卖股票池里的股票；想买池子外的票，先把它加进池子再说。
 2. A 股 T+1，当天买的不能当天卖；数量必须是 100 股的整数倍。
 3. 单票仓位不超过总资产的 {max_position_pct}，且至少要留 {min_cash_pct} 现金——除非你在清仓，否则不要满仓。
+   【这一轮的额度】里写的是这一轮实际还剩多少空间和笔数，按那个来，不要自己估。
 4. 可以什么都不做。没机会就不动，"今天不想动"是一个完全体面的答案。
 5. 每轮只做真正的判断，不要为了显勤奋而交易。
 6. 你可以自己决定下次多久后再看盘（next_check_minutes，10~240 分钟）：行情剧烈就早点回来，平淡就久一点。
@@ -100,6 +101,23 @@ def _coerce_int(value: Any, *, field_name: str) -> int:
     if isinstance(value, str) and value.strip().isdigit():
         return int(value.strip())
     raise DecisionParseError(f"{field_name} 不是整数: {value!r}")
+
+
+def _position_pct_text(balance: Dict[str, Any], positions: Sequence[Holding]) -> str:
+    """当前仓位；妙想偶尔不给 totalPosPct，就用持仓市值自己算。
+
+    额度块里的仓位是用持仓市值算的，这里若退回「未知」，
+    同一个 prompt 里就会出现「仓位 未知」和「现在 41.3%」并存的怪事。
+    """
+
+    reported = pct(balance.get("totalPosPct"))
+    if reported != UNKNOWN:
+        return reported
+    total_assets = to_float(balance.get("totalAssets"))
+    if total_assets <= 0:
+        return UNKNOWN
+    held_value = sum(item.market_value for item in positions)
+    return f"{held_value / total_assets * 100:.2f}%"
 
 
 def _clean_text(value: Any, *, limit: int) -> str:
@@ -214,7 +232,8 @@ def build_messages(
     positions: Sequence[Holding],
     pool_lines: Sequence[str],
     pending_orders: Sequence[str],
-    recent_notes: Sequence[str],
+    history_blocks: Sequence[str],
+    limits_block: Sequence[str] = (),
     idle_note: str = "",
     bot_name: str = "麦麦",
     persona: str = "",
@@ -225,6 +244,8 @@ def build_messages(
     """拼出本轮决策用的 messages。
 
     Args:
+        limits_block: 这一轮实际还能动多少（单票余量、总仓位余量、剩余笔数），
+            由调用方算好数字；空着就不渲染这一块。
         risk_style: 当前风险档的风格提示（稳健/激进/梭哈），留空则不注入。
         max_position_pct / min_cash_pct: 由配置与风险档算出的实际限制，
             直接写进 system prompt，避免 prompt 里的数字和代码里的校验对不上。
@@ -236,9 +257,10 @@ def build_messages(
         f"持仓市值 {money(balance.get('totalPosValue'))}",
         f"累计盈亏 {account_profit(balance)}",
         f"净值 {ratio(balance.get('nav'))}",
-        f"仓位 {pct(balance.get('totalPosPct'))}",
+        f"仓位 {_position_pct_text(balance, positions)}",
     ]
     position_lines = [item.to_prompt_line(money=money, price=price) for item in positions] or ["（空仓）"]
+    quota_lines = ["【这一轮的额度】", *limits_block, ""] if limits_block else []
 
     user_text = "\n".join(
         [
@@ -251,14 +273,15 @@ def build_messages(
             "【持仓】",
             *position_lines,
             "",
+            *quota_lines,
             "【股票池与最新行情】",
             *(pool_lines or ["（池子是空的，先加几只）"]),
             "",
             "【未成交委托】",
             *(pending_orders or ["（无）"]),
             "",
-            "【最近几轮的记录】",
-            *(recent_notes or ["（这是第一轮）"]),
+            "【最近几轮（越靠下越新，接着上面的思路想，不要每轮重新开始）】",
+            *(history_blocks or ["（这是第一轮）"]),
             "",
             "请判断这一轮要不要动，并按格式输出 JSON。",
         ]
