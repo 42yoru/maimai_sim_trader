@@ -263,6 +263,36 @@ class RoundFlowTests(unittest.IsolatedAsyncioTestCase):
             self.assertGreater(state.next_check_at, 0.0)
             self.assertEqual(state.trade_date, "2026-10-19")
 
+    async def test_round_record_is_persisted(self) -> None:
+        """整轮跑完要留下「当时怎么想、做了什么」，下一轮才能接上。"""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            plugin = build_plugin(Path(tmp))
+            plugin._state.load().roll_date("2026-10-19")
+            await plugin._run_round(datetime(2026, 10, 19, 10, 0), "2026-10-19")
+            records = plugin._state.load().round_records
+            self.assertEqual(len(records), 1)
+            record = records[0]
+            self.assertEqual(record.at, "10-19 10:00")
+            self.assertEqual(record.mood, "手有点痒")
+            self.assertEqual(record.reasoning, "空仓太久，先拿三成试水")
+            # 成交行必须留下，别被池子变更挤掉
+            self.assertTrue(any(line.startswith("买了") for line in record.actions), record.actions)
+
+    async def test_chat_triggered_round_rolls_date(self) -> None:
+        """只靠聊天触发（schedule 关掉）时也要跨日重置，否则笔数会一直累加。"""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            plugin = build_plugin(Path(tmp))
+            state = plugin._state.load()
+            state.trade_date = "2026-10-18"
+            state.trade_count = 5
+            plugin._state.save()
+            await plugin._run_round(datetime(2026, 10, 19, 10, 0), "2026-10-19", announce=False)
+            state = plugin._state.load()
+            self.assertEqual(state.trade_date, "2026-10-19")
+            self.assertEqual(state.trade_count, 2)
+
     async def test_missing_group_stream_does_not_crash(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             plugin = build_plugin(Path(tmp))

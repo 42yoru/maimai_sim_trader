@@ -317,6 +317,35 @@ class DecisionPromptTests(unittest.TestCase):
         self.assertIn("仓位 40.00%", user_text)
         self.assertNotIn("仓位 未知", user_text)
 
+    def test_position_pct_zero_with_holdings_falls_back(self) -> None:
+        """有持仓却报 0.00%，多半是字段没同步，也按持仓市值算。"""
+
+        holding = POSITIONS.Holding(
+            code="600519",
+            name="贵州茅台",
+            quantity=100,
+            available=100,
+            avg_cost=1.0,
+            current_price=2000.0,
+            market_value=200000.0,
+            profit=0.0,
+        )
+        user_text = self._messages(
+            balance={"totalAssets": 500000.0, "totalPosPct": 0},
+            positions=[holding],
+        )[1]["content"]
+        self.assertIn("仓位 40.00%", user_text)
+
+    def test_no_limits_notice_without_block(self) -> None:
+        """没渲染额度块时，规则里也不该提到它。"""
+
+        system_text = self._messages()[0]["content"]
+        self.assertNotIn("【这一轮的额度】", system_text)
+
+    def test_limits_notice_present_with_block(self) -> None:
+        system_text = self._messages(limits_block=["- 今天还能下 3 笔"])[0]["content"]
+        self.assertIn("【这一轮的额度】", system_text)
+
 
 class LimitsBlockTests(unittest.TestCase):
     """额度块：数字必须来自实际持仓和当日笔数。"""
@@ -367,6 +396,28 @@ class LimitsBlockTests(unittest.TestCase):
             trades_used=9,
         )
         self.assertIn("还能下 0 笔", "\n".join(lines))
+
+    def test_holdings_without_assets_are_not_reported_empty(self) -> None:
+        """有持仓但总资产取不到时，不能说自己空仓。"""
+
+        lines = PLUGIN_MODULE.build_limits_block(
+            limits={"max_position_ratio": 0.2, "min_cash_reserve_ratio": 0.2, "max_trades_per_day": 6},
+            balance={},
+            positions=[self._holding("600519", "贵州茅台", 190000)],
+            trades_used=0,
+        )
+        text = "\n".join(lines)
+        self.assertNotIn("空仓", text)
+        self.assertIn("总资产取不到", text)
+
+    def test_holdings_with_zero_assets_are_not_reported_empty(self) -> None:
+        lines = PLUGIN_MODULE.build_limits_block(
+            limits={"max_position_ratio": 0.2, "min_cash_reserve_ratio": 0.2, "max_trades_per_day": 6},
+            balance={"totalAssets": 0},
+            positions=[self._holding("600519", "贵州茅台", 190000)],
+            trades_used=0,
+        )
+        self.assertNotIn("空仓", "\n".join(lines))
 
 
 class ConfigUiSchemaTests(unittest.TestCase):
@@ -622,6 +673,23 @@ class StateTests(unittest.TestCase):
     def test_round_record_rejects_bad_actions(self) -> None:
         with self.assertRaises(STATE.StateError):
             STATE.RoundRecord.from_dict({"at": "10-19 10:00", "actions": "不是数组"})
+
+    def test_round_record_rejects_non_dict(self) -> None:
+        with self.assertRaises(STATE.StateError):
+            STATE.RoundRecord.from_dict("oops")
+
+    def test_loaded_records_are_capped(self) -> None:
+        """手改过的状态文件也不能超过上限。"""
+
+        raw = {
+            "version": STATE.STATE_VERSION,
+            "round_records": [
+                {"at": f"10-19 10:{index:02d}", "reasoning": f"第 {index} 轮"} for index in range(STATE.MAX_ROUND_RECORDS + 6)
+            ],
+        }
+        state = RuntimeState.from_dict(raw)
+        self.assertEqual(len(state.round_records), STATE.MAX_ROUND_RECORDS)
+        self.assertEqual(state.round_records[-1].reasoning, f"第 {STATE.MAX_ROUND_RECORDS + 5} 轮")
 
     def test_prompt_block_without_time_still_renders(self) -> None:
         """老数据没有时间戳，也不能渲染出个空字符串。"""

@@ -68,8 +68,7 @@ SYSTEM_PROMPT = """{header}
 规则（必须遵守）：
 1. 只能买卖股票池里的股票；想买池子外的票，先把它加进池子再说。
 2. A 股 T+1，当天买的不能当天卖；数量必须是 100 股的整数倍。
-3. 单票仓位不超过总资产的 {max_position_pct}，且至少要留 {min_cash_pct} 现金——除非你在清仓，否则不要满仓。
-   【这一轮的额度】里写的是这一轮实际还剩多少空间和笔数，按那个来，不要自己估。
+3. 单票仓位不超过总资产的 {max_position_pct}，且至少要留 {min_cash_pct} 现金——除非你在清仓，否则不要满仓。{limits_notice}
 4. 可以什么都不做。没机会就不动，"今天不想动"是一个完全体面的答案。
 5. 每轮只做真正的判断，不要为了显勤奋而交易。
 6. 你可以自己决定下次多久后再看盘（next_check_minutes，10~240 分钟）：行情剧烈就早点回来，平淡就久一点。
@@ -111,7 +110,9 @@ def _position_pct_text(balance: Dict[str, Any], positions: Sequence[Holding]) ->
     """
 
     reported = pct(balance.get("totalPosPct"))
-    if reported != UNKNOWN:
+    reported_value = to_float(balance.get("totalPosPct"))
+    # 有持仓却报 0，多半是字段没同步，也按持仓市值算
+    if reported != UNKNOWN and not (reported_value == 0 and positions):
         return reported
     total_assets = to_float(balance.get("totalAssets"))
     if total_assets <= 0:
@@ -287,10 +288,17 @@ def build_messages(
         ]
     )
     header = persona.strip() or f"你是{bot_name}。"
+    # 只有真的渲染了额度块，才让规则指向它，避免 prompt 里提到不存在的小节
+    limits_notice = (
+        "\n   【这一轮的额度】里写的是这一轮实际还剩多少空间和笔数，按那个来，不要自己估。"
+        if limits_block
+        else ""
+    )
     system_text = (
         SYSTEM_PROMPT.replace("{header}", header)
         .replace("{max_position_pct}", max_position_pct)
         .replace("{min_cash_pct}", min_cash_pct)
+        .replace("{limits_notice}", limits_notice)
     )
     if risk_style.strip():
         system_text = f"{system_text}\n\n【这一轮的风格】\n{risk_style.strip()}"

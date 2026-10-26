@@ -6,17 +6,18 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import date
+from pathlib import Path
 from typing import Any, Dict, List
 
 import json
 import os
-from datetime import date
-from pathlib import Path
 
 STATE_VERSION = 1
 MAX_ROUND_RECORDS = 24
 MAX_ROUND_ACTIONS = 6
 HISTORY_IN_PROMPT = 8
+HISTORY_IN_REPLY = 6
 
 
 class StateError(RuntimeError):
@@ -56,6 +57,8 @@ class RoundRecord:
     def from_dict(cls, raw: Dict[str, Any]) -> "RoundRecord":
         """反序列化；缺字段按空处理，类型不对直接报错。"""
 
+        if not isinstance(raw, dict):
+            raise StateError(f"round_records 的条目必须是对象，实际是 {type(raw).__name__}")
         actions = raw.get("actions") or []
         if not isinstance(actions, list):
             raise StateError("round_records.actions 不是数组")
@@ -191,7 +194,7 @@ class RuntimeState:
             last_mood=str(raw.get("last_mood") or ""),
             last_reasoning=str(raw.get("last_reasoning") or ""),
             empty_since=str(raw.get("empty_since") or ""),
-            round_records=records,
+            round_records=records[-MAX_ROUND_RECORDS:],
             reported_dates=[str(item) for item in (raw.get("reported_dates") or [])],
         )
 
@@ -242,6 +245,7 @@ class StateStore:
 
 __all__ = [
     "HISTORY_IN_PROMPT",
+    "HISTORY_IN_REPLY",
     "MAX_ROUND_ACTIONS",
     "MAX_ROUND_RECORDS",
     "STATE_VERSION",

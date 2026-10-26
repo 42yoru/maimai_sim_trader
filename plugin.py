@@ -24,7 +24,14 @@ from .positions import Holding, find_holding, parse_holdings
 from .query_args import QueryParseError, parse_rate_argument, parse_stock_query
 from .quotes import Quote, TencentQuoteClient
 from .report import build_plain_fallback, build_report_messages, build_snapshot_lines
-from .state import HISTORY_IN_PROMPT, MAX_ROUND_ACTIONS, RoundRecord, RuntimeState, StateStore
+from .state import (
+    HISTORY_IN_PROMPT,
+    HISTORY_IN_REPLY,
+    MAX_ROUND_ACTIONS,
+    RoundRecord,
+    RuntimeState,
+    StateStore,
+)
 from .trading import LOT_SIZE, check_sell, limit_price, resolve_quantity
 from .watchlist import WatchlistStore, is_valid_code
 
@@ -32,7 +39,6 @@ LOGGER_NAME = "maimai.sim-trader"
 DEFAULT_BOT_NAME = "麦麦"
 DEFAULT_SESSIONS = ("09:30-11:30", "13:00-15:00")
 TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
-RECORDS_IN_HISTORY_REPLY = 6
 
 
 # ──── 配置模型 ────
@@ -46,7 +52,7 @@ class PluginSectionConfig(PluginConfigBase):
     __ui_order__ = 0
 
     enabled: bool = Field(default=True, description="是否启用插件")
-    config_version: str = Field(default="0.7.2", description="配置版本")
+    config_version: str = Field(default="0.7.3", description="配置版本")
 
 
 class MxSectionConfig(PluginConfigBase):
@@ -576,6 +582,9 @@ class SimTraderPlugin(MaiBotPlugin):
         self._busy = True
         store = self._require_state()
         state = store.load()
+        # 聊天触发的看盘不走 _tick，这里也要跨日重置，否则「今天已下几笔」会一直累加
+        if not dry_run and state.roll_date(today):
+            store.save()
         try:
             mx = self._require_mx()
             balance = await mx.get_balance()
@@ -894,11 +903,14 @@ class SimTraderPlugin(MaiBotPlugin):
         """
 
         actions = [str(line).strip() for line in round_notes if str(line).strip()]
+        # 成交行信息量最大，先把它们挑到前面，别让池子变更把成交挤掉
+        trades = [line for line in actions if line.startswith(("买了", "卖了"))]
+        others = [line for line in actions if not line.startswith(("买了", "卖了"))]
         return RoundRecord(
             at=now.strftime("%m-%d %H:%M"),
             mood=decision.mood,
             reasoning=decision.reasoning,
-            actions=actions[:MAX_ROUND_ACTIONS],
+            actions=(trades + others)[:MAX_ROUND_ACTIONS],
         )
 
     def _history_blocks(self, state: RuntimeState) -> List[str]:
@@ -1211,7 +1223,7 @@ class SimTraderPlugin(MaiBotPlugin):
             lines.append("还没有记录，等她跑过一轮再来看。")
             return "\n".join(lines)
         lines.append("最近几轮（越靠下越新）：")
-        for record in state.round_records[-RECORDS_IN_HISTORY_REPLY:]:
+        for record in state.round_records[-HISTORY_IN_REPLY:]:
             lines.append("· " + record.to_prompt_block().replace("\n", " / "))
         return "\n".join(lines)
 
@@ -1429,8 +1441,10 @@ def build_limits_block(
     positions: Sequence[Holding],
     trades_used: int,
 ) -> List[str]:
-    """把这一轮还剩的额度算成人话：单票余量、总仓位余量、今天还能下几笔。
+    """把这一轮还剩的额度算成人话：单票上限与当前最重占比、总仓位余量、今天还能下几笔。
 
+    仓位口径按「持仓市值 / 总资产」算，没扣未成交委托冻结的可用资金；
+    真下单时 trading.resolve_quantity 还会用可用资金再压一次，不会超。
     让模型自己从「单票不超过 36%」推算「现在还能加多少」很容易算错，
     不如直接把数字摆出来，它只需要决定用不用。
     """
@@ -1441,7 +1455,14 @@ def build_limits_block(
     total_assets = _to_float(balance.get("totalAssets"))
 
     lines: List[str] = []
-    if total_assets > 0 and positions:
+    if not positions:
+        lines.append(f"- 单票上限 {single_cap:.0%}；现在空仓")
+        lines.append(f"- 总仓位上限 {1 - cash_floor:.0%}（现金至少留 {cash_floor:.0%}）")
+    elif total_assets <= 0:
+        # 有持仓但总资产取不到：说清「占比这轮不算」，别让模型以为自己空仓
+        lines.append(f"- 单票上限 {single_cap:.0%}；持有 {len(positions)} 只，但总资产取不到，占比这轮不算")
+        lines.append(f"- 总仓位上限 {1 - cash_floor:.0%}（现金至少留 {cash_floor:.0%}）")
+    else:
         heaviest = max(positions, key=lambda item: item.market_value)
         held_total = sum(item.market_value for item in positions)
         held_pct = held_total / total_assets
@@ -1453,9 +1474,6 @@ def build_limits_block(
             f"- 总仓位上限 {1 - cash_floor:.0%}（现金至少留 {cash_floor:.0%}），"
             f"现在 {held_pct:.1%}，还能再加 {max(0.0, 1 - cash_floor - held_pct):.1%}"
         )
-    else:
-        lines.append(f"- 单票上限 {single_cap:.0%}；现在空仓")
-        lines.append(f"- 总仓位上限 {1 - cash_floor:.0%}（现金至少留 {cash_floor:.0%}）")
     lines.append(
         f"- 今天已下 {trades_used} 笔，上限 {trades_cap} 笔，还能下 {max(0, trades_cap - trades_used)} 笔"
     )
