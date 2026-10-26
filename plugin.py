@@ -52,7 +52,7 @@ class PluginSectionConfig(PluginConfigBase):
     __ui_order__ = 0
 
     enabled: bool = Field(default=True, description="是否启用插件")
-    config_version: str = Field(default="0.7.3", description="配置版本")
+    config_version: str = Field(default="0.7.4", description="配置版本")
 
 
 class MxSectionConfig(PluginConfigBase):
@@ -326,6 +326,11 @@ class SimTraderPlugin(MaiBotPlugin):
     def _warn_if_not_configured(self) -> None:
         """首次下载后最容易漏填的几项一次性说清楚，别让用户以为插件坏了。"""
 
+        if not self._api_key():
+            self.ctx.logger.warning(
+                "没有配置妙想 API Key：[mx] api_key 为空，环境变量 MX_APIKEY 也没有。"
+                "没有 Key 就拿不到账户和行情，每一轮看盘都会失败。"
+            )
         notify = self.config.notify
         targets = list(notify.group_ids)
         if notify.private_enabled:
