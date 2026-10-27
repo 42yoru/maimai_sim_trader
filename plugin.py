@@ -52,7 +52,7 @@ class PluginSectionConfig(PluginConfigBase):
     __ui_order__ = 0
 
     enabled: bool = Field(default=True, description="是否启用插件")
-    config_version: str = Field(default="0.7.4", description="配置版本")
+    config_version: str = Field(default="0.7.5", description="配置版本")
 
 
 class MxSectionConfig(PluginConfigBase):
@@ -122,16 +122,22 @@ class ModelSectionConfig(PluginConfigBase):
     report_model: str = Field(default="", description="播报用的具体模型名，留空跟随任务")
     temperature: float = Field(default=0.7, ge=0.0, le=2.0, description="决策温度")
     max_tokens: int = Field(
-        default=4000,
-        ge=200,
+        default=0,
+        ge=0,
         le=16000,
-        description="决策输出上限。推理模型（reasoning effort）思考也要占额度，给小了正文会是空的",
+        description=(
+            "决策输出上限；0 表示跟随宿主任务配置（推荐）。"
+            "填了就会覆盖宿主设置——推理模型（reasoning effort）思考也占额度，给小了正文会空"
+        ),
     )
     report_max_tokens: int = Field(
-        default=2000,
-        ge=200,
+        default=0,
+        ge=0,
         le=16000,
-        description="播报输出上限。同样要给推理模型留出思考空间",
+        description=(
+            "播报输出上限；0 表示跟随宿主任务配置（推荐）。"
+            "推理模型写播报也要先思考，覆盖成小数值会让这一轮播报直接失败"
+        ),
     )
     request_timeout_ms: int = Field(
         default=180000,
@@ -686,8 +692,10 @@ class SimTraderPlugin(MaiBotPlugin):
             "prompt": messages,
             "model_name": model_name or "",
             "temperature": temperature,
-            "max_tokens": max_tokens,
         }
+        # 0 表示「跟随宿主任务配置」：不自作主张压额度，免得推理模型思考没写完就被截断
+        if max_tokens > 0:
+            payload["max_tokens"] = max_tokens
         if task_name:
             payload["task_name"] = task_name
         result = await self.ctx.call_capability(
@@ -698,6 +706,23 @@ class SimTraderPlugin(MaiBotPlugin):
         if not isinstance(result, dict):
             return {"success": False, "error": f"模型返回了非对象结果: {type(result).__name__}"}
         return result
+
+    @staticmethod
+    def _llm_failure_hint(result: Dict[str, Any]) -> str:
+        """把宿主返回的模型错误翻成用户能动手的方案。
+
+        最常见的一种是推理模型把输出额度全花在思考上（``max_output_tokens``），
+        宿主只会给一串英文原因，不翻译的话没人知道该改哪里。
+        """
+
+        error = str(result.get("error") or result)
+        if "max_output_tokens" in error or "IncompleteDetails" in error:
+            return (
+                f"模型把输出额度全花在思考上、正文没写出来（{error}）。"
+                "把 [model] max_tokens / report_max_tokens 设成 0（跟随宿主任务）或调大，"
+                "也可以给这个任务换一个非推理模型。"
+            )
+        return f"模型调用失败: {error}"
 
     async def _ask_model(
         self,
@@ -754,7 +779,7 @@ class SimTraderPlugin(MaiBotPlugin):
             max_tokens=self.config.model.max_tokens,
         )
         if not result.get("success"):
-            raise RuntimeError(f"模型调用失败: {result.get('error') or result}")
+            raise RuntimeError(self._llm_failure_hint(result))
         text = str(result.get("response") or "")
         if not text.strip():
             # 思考型模型会把额度全花在 reasoning 上，正文一空就必然是 max_tokens 不够
@@ -956,7 +981,7 @@ class SimTraderPlugin(MaiBotPlugin):
             if result.get("success"):
                 text = str(result.get("response") or "").strip()
             else:
-                self.ctx.logger.warning("播报模型调用失败，改用纯文本: %s", result.get("error") or result)
+                self.ctx.logger.warning("播报模型调用失败，改用纯文本: %s", self._llm_failure_hint(result))
         except Exception:
             self.ctx.logger.error("生成播报文案失败，改用纯文本", exc_info=True)
         if not text:

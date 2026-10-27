@@ -136,6 +136,7 @@ class FakeHarness:
     def __init__(self) -> None:
         self.sent: List[Dict[str, str]] = []
         self.llm_prompts: List[Any] = []
+        self.llm_args: List[Dict[str, Any]] = []
 
     async def rpc(self, method: str, plugin_id: str, payload: Dict[str, Any], timeout_ms: Optional[int] = None) -> Any:
         del method, plugin_id, timeout_ms
@@ -143,6 +144,7 @@ class FakeHarness:
         args = payload["args"]
         if capability == "llm.generate":
             self.llm_prompts.append(args.get("prompt"))
+            self.llm_args.append(dict(args))
             return {"success": True, "response": DECISION_TEXT, "reasoning": "", "model": "fake"}
         if capability == "send.text":
             self.sent.append({"stream_id": args["stream_id"], "text": args["text"]})
@@ -208,6 +210,32 @@ class RoundFlowTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(plugin._mx.placed), 0)
             buy_notes = [note for note in notes if note.startswith("（试跑）会买")]
             self.assertEqual(len(buy_notes), 2)
+
+    async def test_zero_max_tokens_follows_host_task(self) -> None:
+        """max_tokens=0 表示跟随宿主任务，不能往请求里塞一个死数字。"""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            plugin = build_plugin(Path(tmp))
+            harness = FakeHarness()
+            plugin.ctx._rpc_call = harness.rpc
+
+            await plugin._run_round(datetime(2026, 10, 19, 10, 0), "2026-10-19", dry_run=True)
+
+            self.assertTrue(harness.llm_args)
+            self.assertNotIn("max_tokens", harness.llm_args[0])
+
+    async def test_explicit_max_tokens_is_forwarded(self) -> None:
+        """填了正数就照传，用户想自己限长时仍然有效。"""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            plugin = build_plugin(Path(tmp))
+            plugin.config.model.max_tokens = 6000
+            harness = FakeHarness()
+            plugin.ctx._rpc_call = harness.rpc
+
+            await plugin._run_round(datetime(2026, 10, 19, 10, 0), "2026-10-19", dry_run=True)
+
+            self.assertEqual(harness.llm_args[0]["max_tokens"], 6000)
 
     async def test_live_round_places_orders_and_broadcasts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
