@@ -67,13 +67,22 @@ _SECTIONS: Dict[str, _Section] = {
             "max_position_ratio": "单票仓位上限",
             "min_cash_reserve_ratio": "现金底线",
             "max_trades_per_day": "每日下单上限",
+            "buy_fee_rate": "买入费用率",
+            "sell_fee_rate": "卖出费用率",
+            "min_commission": "单笔最低佣金（元）",
         },
     ),
     "risk": _Section(
         source="risk",
         title="胆量档位",
         description="一款开关三档：稳健 / 激进 / 梭哈。它决定这台机器有多敢下手。",
-        fields={"profile": "决策胆量"},
+        fields={
+            "profile": "决策胆量",
+            "position_multiplier": "单票仓位倍数（覆盖档位）",
+            "cash_multiplier": "现金底线倍数（覆盖档位）",
+            "trades_multiplier": "每日笔数倍数（覆盖档位）",
+            "slippage_delta": "额外让价（覆盖档位）",
+        },
     ),
     "schedule": _Section(
         source="schedule",
@@ -86,6 +95,16 @@ _SECTIONS: Dict[str, _Section] = {
             "min_interval_minutes": "最短间隔（分钟）",
             "max_interval_minutes": "最长间隔（分钟）",
         },
+    ),
+    "prompt": _Section(
+        source="prompt",
+        title="决策提示词",
+        description=(
+            "她做交易判断时用的 system 提示词。必须保留 {header}、{max_position_pct}、{min_cash_pct} "
+            "三个占位符，否则加载时直接报错——不会悄悄换回默认模板。"
+        ),
+        fields={"system_template": "提示词模板"},
+        collapsed=True,
     ),
     "model": _Section(
         source="model",
@@ -134,7 +153,7 @@ _TABS = {
     "basic": ("常用设置", ("mx", "notify", "owner")),
     "trading": ("交易", ("account", "risk", "schedule")),
     "model": ("模型", ("model",)),
-    "advanced": ("高级", ("schedule_adv", "model_adv", "plugin_info")),
+    "advanced": ("高级", ("schedule_adv", "model_adv", "prompt", "plugin_info")),
 }
 
 # 覆盖 SDK 自动生成的描述：说明「填什么、为什么、填错会怎样」
@@ -158,10 +177,21 @@ _HINTS: Dict[str, str] = {
     "account.max_position_ratio": "单只股票最多占总资产多少；还会被「胆量档位」按倍数放大，代码里硬上限 40%。",
     "account.min_cash_reserve_ratio": "买入后至少留多少现金；梭哈档会把它压到很低。",
     "account.max_trades_per_day": "单日最多下几笔单，防上头；代码里硬上限 12 笔。",
+    "account.buy_fee_rate": "买入佣金+过户费，默认 0.0006。只参与额度与仓位换算，真实扣费在妙想侧。",
+    "account.sell_fee_rate": "卖出费用率（含印花税），默认 0.0011；小单卖出还不如拿着时会被拦下。",
+    "account.min_commission": "券商单笔最低佣金，A 股普遍 5 元；填 0 表示不模拟。小单的真实成本靠它显形。",
     "risk.profile": (
         "steady 稳健 / aggressive 激进 / yolo 梭哈。"
-        "档位在账户那一节的数字上乘倍数（单票 ×1/×1.4/×1.8，现金 ×1/×0.5/×0.1，"
-        "笔数 ×1/×1.8/×2），代码里还有绝对上限，翻不过去。"
+        "档位在账户那一节的数字上乘倍数（单票 ×1/×1.25/×1.6，现金 ×1/×0.75/×0.4，"
+        "笔数 ×1/×1.3/×1.8），代码里还有绝对上限，翻不过去。"
+    ),
+    "risk.position_multiplier": "留空用档位预设；填 1.0 表示完全按 [account] 的原始数字，不被倍数放大。",
+    "risk.cash_multiplier": "留空用档位预设；数值越大越保守（现金底线越高）。",
+    "risk.trades_multiplier": "留空用档位预设；想少动手就填小一点。",
+    "risk.slippage_delta": "在 [account] slippage 之上再加的让价，留空用档位预设。",
+    "prompt.system_template": (
+        "她每轮做交易判断用的 system 提示词。必须保留 {header}、{max_position_pct}、"
+        "{min_cash_pct} 三个占位符，{limits_notice} 可选；缺了会在加载时报错。"
     ),
     "schedule.sessions": "格式 HH:MM-HH:MM，可以写多段；只在这些时段内自动看盘。",
     "schedule.min_interval_minutes": "她自己决定的间隔不会低于这个值。",

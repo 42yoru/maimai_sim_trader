@@ -72,7 +72,10 @@ SYSTEM_PROMPT = """{header}
 4. 可以什么都不做。没机会就不动，"今天不想动"是一个完全体面的答案。
 5. 每轮只做真正的判断，不要为了显勤奋而交易。
 6. 你可以自己决定下次多久后再看盘（next_check_minutes，10~240 分钟）：行情剧烈就早点回来，平淡就久一点。
-7. 已经连续空仓好几天的话，这一轮要么动手建仓，要么用一句话讲清你到底在等什么——不许含糊过去。
+7. 空仓不是欠债。连续空仓几天时，要么动手，要么用一句话讲清你在等什么；"继续等"是合格答案，
+   但理由不能用"别人都在赚"。
+8. 每一笔买卖都有成本：买入约 0.06%、卖出约 0.11%（含印花税）、券商单笔最低佣金、再加上让价。
+   频繁换手本身就在亏钱。同一只票刚买几天又想卖时，先说清这一进一出赚到了什么，别只是手痒。
 
 只输出一个 JSON 对象，不要任何解释文字、不要 markdown 代码块：
 {
@@ -86,6 +89,9 @@ SYSTEM_PROMPT = """{header}
   "speech": "如果想在群里说一句话就说，没有就留空字符串"
 }
 actions 最多 3 条，可以是空数组。pool_change 的 add/remove 没有就留空数组。"""
+
+# 用户可覆盖的默认模板：配置里的 [prompt] system_template 留空/未改时用它
+DEFAULT_SYSTEM_PROMPT = SYSTEM_PROMPT
 
 
 def _coerce_int(value: Any, *, field_name: str) -> int:
@@ -241,6 +247,7 @@ def build_messages(
     risk_style: str = "",
     max_position_pct: str = "20%",
     min_cash_pct: str = "20%",
+    system_template: str = DEFAULT_SYSTEM_PROMPT,
 ) -> List[Dict[str, str]]:
     """拼出本轮决策用的 messages。
 
@@ -248,6 +255,7 @@ def build_messages(
         limits_block: 这一轮实际还能动多少（单票余量、总仓位余量、剩余笔数），
             由调用方算好数字；空着就不渲染这一块。
         risk_style: 当前风险档的风格提示（稳健/激进/梭哈），留空则不注入。
+        system_template: system 提示词模板，默认用内置的 DEFAULT_SYSTEM_PROMPT。
         max_position_pct / min_cash_pct: 由配置与风险档算出的实际限制，
             直接写进 system prompt，避免 prompt 里的数字和代码里的校验对不上。
     """
@@ -295,7 +303,7 @@ def build_messages(
         else ""
     )
     system_text = (
-        SYSTEM_PROMPT.replace("{header}", header)
+        system_template.replace("{header}", header)
         .replace("{max_position_pct}", max_position_pct)
         .replace("{min_cash_pct}", min_cash_pct)
         .replace("{limits_notice}", limits_notice)
@@ -310,6 +318,7 @@ def build_messages(
 
 __all__ = [
     "DEFAULT_CHECK_MINUTES",
+    "DEFAULT_SYSTEM_PROMPT",
     "MAX_ACTIONS",
     "MAX_CHECK_MINUTES",
     "MIN_CHECK_MINUTES",

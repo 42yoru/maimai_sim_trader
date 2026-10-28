@@ -1,6 +1,6 @@
 [plugin]
 enabled = true
-config_version = "0.7.8"
+config_version = "0.8.0"
 
 [mx]
 # 东方财富妙想 API Key，mkt_v_ 开头；留空则读环境变量 MX_APIKEY
@@ -20,16 +20,27 @@ max_position_ratio = 0.2
 min_cash_reserve_ratio = 0.2
 # 单日最多下几笔单
 max_trades_per_day = 6
+# 买入费用率（佣金+过户费），只用于额度与仓位换算，真实扣费在妙想侧
+buy_fee_rate = 0.0006
+# 卖出费用率（含印花税）
+sell_fee_rate = 0.0011
+# 券商单笔最低佣金（元）：A 股普遍 5 元，模拟它小单的真实成本才会显形；填 0 关闭
+min_commission = 5.0
 
 [risk]
 # 决策的大胆程度，三档：
 #   steady     = 稳健（默认，和上面的数字一致）
-#   aggressive = 激进（单票放宽到 1.4 倍、现金底线降到一半、每日笔数 1.8 倍、让价 +0.1%）
-#   yolo       = 梭哈（单票 1.8 倍、现金 0.1 倍、笔数 2 倍、让价 +0.2%）
+#   aggressive = 激进（单票 1.25 倍、现金底线 0.75 倍、每日笔数 1.3 倍、让价 +0.1%）
+#   yolo       = 梭哈（单票 1.6 倍、现金 0.4 倍、笔数 1.8 倍、让价 +0.2%）
 # 档位只是在上面的数字上乘倍数，代码里还有绝对上限（单票 ≤40%、每日 ≤12 笔）。
 # 决策 prompt 里会同时给出这一轮实际剩余的额度（单票余量、仓位余量、还能下几笔）。
 # 写错了会直接报错，不会静默退回默认档。
 profile = "steady"
+# 下面四项留空（注释掉）表示沿用档位预设；填了就覆盖，用来单独微调某一项
+# position_multiplier = 1.0   # 单票仓位倍数；1.0 = 完全按 [account] 的原始数字，不被放大
+# cash_multiplier = 1.0       # 现金底线倍数；越大越保守
+# trades_multiplier = 1.0     # 每日笔数倍数；想少动手就填小
+# slippage_delta = 0.0        # 在 [account] slippage 之上再加的让价
 
 [schedule]
 enabled = true
@@ -75,3 +86,11 @@ close_report_after = "15:00"
 # 能改动股票池和看盘节奏的用户，格式 platform:user_id，例如 "qq:123456789"
 # 留空表示只有查询类命令可用
 owners = []
+
+[prompt]
+# 决策用的 system 提示词模板。必须保留 {header}、{max_position_pct}、{min_cash_pct} 三个占位符，
+# {limits_notice} 可选；缺了会在加载时直接报错，不会悄悄换回默认模板。
+# 不填就等于用插件内置的那一份（想改语气、加自己的交易纪律时再打开它）。
+# system_template = '''{header}
+# 你现在在替主人打理一个 A 股模拟盘账户……
+# '''

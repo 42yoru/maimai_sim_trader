@@ -200,11 +200,14 @@ def _quotes_stamped_today() -> Any:
     return TodayQuotes()
 
 
-def build_plugin(tmp_dir: Path) -> Any:
-    """构造一个装好假依赖的插件实例。"""
+def build_plugin(tmp_dir: Path, *, overrides: Optional[Dict[str, Any]] = None) -> Any:
+    """构造一个装好假依赖的插件实例；overrides 按配置节覆盖默认值。"""
 
     plugin = PLUGIN_MODULE.SimTraderPlugin()
     config = PLUGIN_MODULE.SimTraderPlugin.build_default_config()
+    if overrides:
+        for section, values in overrides.items():
+            config[section].update(values)
     config["mx"]["api_key"] = "test-key"
     config["notify"]["group_ids"] = [GROUP_ID]
     config["owner"]["owners"] = [f"qq:{OWNER_USER}"]
@@ -933,6 +936,148 @@ class ComponentTimeoutTests(unittest.IsolatedAsyncioTestCase):
             for name in ("stock", "sim_trader_review"):
                 self.assertIn(name, entries)
                 self.assertEqual(entries[name]["metadata"].get("timeout_ms"), 240000)
+
+
+class GuardrailTests(unittest.IsolatedAsyncioTestCase):
+    """本轮新增的风控与解析护栏。"""
+
+    async def test_same_round_repeat_buy_respects_position_cap(self) -> None:
+        """同一轮里连买同一只票，也要受单票上限约束。
+
+        轮首的 holding.market_value 不会随成交更新，第二次买入如果还按旧市值算，
+        两次各 10% 就叠成了 20%+，上限形同不存在。
+        """
+
+        decision = json.dumps(
+            {
+                "mood": "想加仓",
+                "reasoning": "同一只票分两笔买",
+                "actions": [
+                    {"action": "buy", "code": "601899", "name": "紫金矿业", "quantity": 3400, "reason": "第一笔"},
+                    {"action": "buy", "code": "601899", "name": "紫金矿业", "quantity": 3400, "reason": "第二笔"},
+                ],
+                "pool_change": {"add": [], "remove": []},
+                "next_check_minutes": 30,
+                "speech": "",
+            },
+            ensure_ascii=False,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            plugin = build_plugin(Path(tmp), overrides={"account": {"max_position_ratio": 0.2}})
+            harness = FakeHarness()
+
+            async def rpc(method: str, plugin_id: str, payload: Dict[str, Any], timeout_ms: Optional[int] = None) -> Any:
+                if payload["capability"] == "llm.generate":
+                    harness.llm_prompts.append(payload["args"].get("prompt"))
+                    return {"success": True, "response": decision, "reasoning": "", "model": "fake"}
+                return await harness.rpc(method, plugin_id, payload, timeout_ms=timeout_ms)
+
+            plugin.ctx._rpc_call = rpc
+            await plugin._run_round(datetime(2026, 10, 19, 10, 0), "2026-10-19", announce=False)
+
+            spent = sum(item["price"] * item["quantity"] for item in plugin._mx.placed if item["code"] == "601899")
+            self.assertGreater(spent, 0)
+            # 单票上限 20% × 总资产 100 万 = 20 万；允许 1% 的费用/取整误差
+            self.assertLessEqual(spent, 200_000 * 1.01)
+
+    async def test_open_buy_order_blocks_repeat_buy(self) -> None:
+        """还挂着的买单（未成交）不该再对同一只票下一笔。"""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            plugin = build_plugin(Path(tmp))
+            harness = FakeHarness()
+            plugin.ctx._rpc_call = harness.rpc
+
+            original = plugin._mx.get_orders
+
+            async def orders_with_pending() -> List[Dict[str, Any]]:
+                return [
+                    {"stockCode": "601899", "direction": "买入", "status": "未成交", "quantity": 3400, "price": 29.9}
+                ]
+
+            plugin._mx.get_orders = orders_with_pending  # type: ignore[method-assign]
+            try:
+                notes = await plugin._run_round(datetime(2026, 10, 19, 10, 0), "2026-10-19", announce=False)
+            finally:
+                plugin._mx.get_orders = original  # type: ignore[method-assign]
+
+            placed_codes = [item["code"] for item in plugin._mx.placed]
+            self.assertNotIn("601899", placed_codes)
+            self.assertTrue(any("没成交的买单" in line for line in notes), notes)
+
+    async def test_decision_parse_failure_retries_once(self) -> None:
+        """解析失败要落原始输出并重试一次，不能整轮直接丢。"""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            plugin = build_plugin(Path(tmp))
+            harness = FakeHarness()
+            responses = ["这不是 JSON", DECISION_TEXT]
+
+            async def rpc(method: str, plugin_id: str, payload: Dict[str, Any], timeout_ms: Optional[int] = None) -> Any:
+                if payload["capability"] == "llm.generate":
+                    harness.llm_prompts.append(payload["args"].get("prompt"))
+                    return {"success": True, "response": responses.pop(0), "reasoning": "", "model": "fake"}
+                return await harness.rpc(method, plugin_id, payload, timeout_ms=timeout_ms)
+
+            plugin.ctx._rpc_call = rpc
+            decision = await plugin._ask_model(
+                now=datetime(2026, 10, 19, 10, 0),
+                balance={"totalAssets": 1000000.0, "availBalance": 1000000.0},
+                positions=[],
+                orders=[],
+                quotes={},
+            )
+
+            self.assertGreaterEqual(len(harness.llm_prompts), 2)
+            self.assertEqual(len(decision.actions), 2)
+            # 第二次请求要带上纠正提示
+            second = json.dumps(harness.llm_prompts[1], ensure_ascii=False)
+            self.assertIn("解析失败", second)
+
+
+class RiskAndPromptConfigTests(unittest.IsolatedAsyncioTestCase):
+    """档位倍率与提示词都应该是用户可改的。"""
+
+    async def test_risk_multipliers_can_be_overridden(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plugin = build_plugin(
+                Path(tmp),
+                overrides={"risk": {"profile": "yolo", "cash_multiplier": 1.0, "trades_multiplier": 1.0}},
+            )
+            limits = plugin._effective_limits()
+
+            # yolo 预设会把现金底线压到 20%×0.4=8%；覆盖成 1.0 之后应回到 20%
+            self.assertAlmostEqual(limits["min_cash_reserve_ratio"], 0.2)
+            self.assertEqual(limits["max_trades_per_day"], 6.0)
+
+    async def test_prompt_template_requires_placeholders(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plugin = build_plugin(Path(tmp), overrides={"prompt": {"system_template": "只有一句话"}})
+
+            with self.assertRaises(RuntimeError):
+                plugin._validate_prompt_template()
+
+    async def test_custom_prompt_template_is_used(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            template = (
+                "{header} 自定义交易规则：只买池子里最强的。"
+                "仓位上限 {max_position_pct}，现金 {min_cash_pct}。"
+            )
+            plugin = build_plugin(Path(tmp), overrides={"prompt": {"system_template": template}})
+            harness = FakeHarness()
+            plugin.ctx._rpc_call = harness.rpc
+
+            await plugin._ask_model(
+                now=datetime(2026, 10, 19, 10, 0),
+                balance={"totalAssets": 1000000.0, "availBalance": 1000000.0},
+                positions=[],
+                orders=[],
+                quotes={},
+            )
+
+            system_message = json.dumps(harness.llm_prompts[0][0], ensure_ascii=False)
+            self.assertIn("自定义交易规则", system_message)
 
 
 if __name__ == "__main__":

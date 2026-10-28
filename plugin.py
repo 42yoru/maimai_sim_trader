@@ -18,7 +18,13 @@ from maibot_sdk import Command, Field, MaiBotPlugin, PluginConfigBase, Tool
 from maibot_sdk.types import ToolParameterInfo, ToolParamType
 
 from .config_ui import build_config_ui_schema
-from .decision import Decision, build_messages, parse_decision
+from .decision import (
+    DEFAULT_SYSTEM_PROMPT,
+    Decision,
+    DecisionParseError,
+    build_messages,
+    parse_decision,
+)
 from .mx_client import DEFAULT_BASE_URL, MxApiError, MxClient
 from .positions import Holding, find_holding, parse_holdings
 from .query_args import QueryParseError, parse_rate_argument, parse_stock_query
@@ -32,10 +38,13 @@ from .state import (
     RuntimeState,
     StateStore,
 )
-from .trading import LOT_SIZE, check_sell, limit_price, resolve_quantity
+from .trading import BUY_FEE_RATE, LOT_SIZE, SELL_FEE_RATE, check_sell, limit_price, resolve_quantity
 from .watchlist import WatchlistStore, is_valid_code
 
 LOGGER_NAME = "maimai.sim-trader"
+DECISION_PARSE_ATTEMPTS = 2
+"""决策 JSON 解析失败时的总尝试次数（含首次）：重试一次比整轮丢掉划算。"""
+
 COMPONENT_TIMEOUT_MS = 240000
 """长耗时组件（/股 试跑、sim_trader_review）的 RPC 超时。
 
@@ -60,7 +69,7 @@ class PluginSectionConfig(PluginConfigBase):
     __ui_order__ = 0
 
     enabled: bool = Field(default=True, description="是否启用插件")
-    config_version: str = Field(default="0.7.8", description="配置版本")
+    config_version: str = Field(default="0.8.0", description="配置版本")
 
 
 class MxSectionConfig(PluginConfigBase):
@@ -90,6 +99,24 @@ class AccountSectionConfig(PluginConfigBase):
     max_position_ratio: float = Field(default=0.2, ge=0.05, le=1.0, description="单票市值占总资产上限")
     min_cash_reserve_ratio: float = Field(default=0.2, ge=0.0, le=0.9, description="买入后至少保留的现金比例")
     max_trades_per_day: int = Field(default=6, ge=1, le=30, description="单日最多下几笔单，防止上头")
+    buy_fee_rate: float = Field(
+        default=BUY_FEE_RATE,
+        ge=0.0,
+        le=0.01,
+        description="买入费用率（佣金+过户费），默认 0.0006；只用于额度与仓位换算，真实扣费在妙想侧",
+    )
+    sell_fee_rate: float = Field(
+        default=SELL_FEE_RATE,
+        ge=0.0,
+        le=0.01,
+        description="卖出费用率（含印花税），默认 0.0011；小单卖出还不如拿着时会被拦下",
+    )
+    min_commission: float = Field(
+        default=5.0,
+        ge=0.0,
+        le=100.0,
+        description="单笔最低佣金（元）。A 股券商普遍 5 元起，全额模拟它能让小单的真实成本显形；填 0 关闭",
+    )
 
 
 class ScheduleSectionConfig(PluginConfigBase):
@@ -185,6 +212,22 @@ class OwnerSectionConfig(PluginConfigBase):
     )
 
 
+class PromptSectionConfig(PluginConfigBase):
+    """决策提示词。"""
+
+    __ui_label__ = "决策提示词"
+    __ui_icon__ = "message-square"
+    __ui_order__ = 8
+
+    system_template: str = Field(
+        default=DEFAULT_SYSTEM_PROMPT,
+        description=(
+            "决策用的 system 提示词模板。必须包含 {header}、{max_position_pct}、{min_cash_pct} 三个占位符，"
+            "{limits_notice} 可选（渲染额度块时会填内容）。缺失必需占位符会在加载时报错，不会静默用默认模板"
+        ),
+    )
+
+
 class RiskSectionConfig(PluginConfigBase):
     """决策大胆程度。"""
 
@@ -200,6 +243,30 @@ class RiskSectionConfig(PluginConfigBase):
             "写错了会直接报错，不会静默退回默认档"
         ),
     )
+    position_multiplier: Optional[float] = Field(
+        default=None,
+        ge=0.1,
+        le=5.0,
+        description="覆盖档位的单票仓位倍数（留空用档位预设）；1.0 表示完全按 [account] 的原始数字",
+    )
+    cash_multiplier: Optional[float] = Field(
+        default=None,
+        ge=0.0,
+        le=5.0,
+        description="覆盖档位的现金底线倍数（留空用档位预设）；越大越保守",
+    )
+    trades_multiplier: Optional[float] = Field(
+        default=None,
+        ge=0.1,
+        le=5.0,
+        description="覆盖档位的每日笔数倍数（留空用档位预设）",
+    )
+    slippage_delta: Optional[float] = Field(
+        default=None,
+        ge=0.0,
+        le=0.02,
+        description="覆盖档位的额外让价（留空用档位预设）；越大会更保守但也更不容易成交",
+    )
 
 
 class SimTraderConfig(PluginConfigBase):
@@ -209,6 +276,7 @@ class SimTraderConfig(PluginConfigBase):
     mx: MxSectionConfig = Field(default_factory=MxSectionConfig)
     account: AccountSectionConfig = Field(default_factory=AccountSectionConfig)
     risk: RiskSectionConfig = Field(default_factory=RiskSectionConfig)
+    prompt: PromptSectionConfig = Field(default_factory=PromptSectionConfig)
     schedule: ScheduleSectionConfig = Field(default_factory=ScheduleSectionConfig)
     model: ModelSectionConfig = Field(default_factory=ModelSectionConfig)
     notify: NotifySectionConfig = Field(default_factory=NotifySectionConfig)
@@ -233,9 +301,9 @@ RISK_PROFILES: Dict[str, Dict[str, Any]] = {
     },
     "aggressive": {
         "label": "激进",
-        "position_multiplier": 1.4,
-        "cash_multiplier": 0.5,
-        "trades_multiplier": 1.8,
+        "position_multiplier": 1.25,
+        "cash_multiplier": 0.75,
+        "trades_multiplier": 1.3,
         "slippage_delta": 0.001,
         "style": (
             "这一轮按激进档来：额度放宽了，能动的笔数也更多，允许比平时更集中；"
@@ -244,9 +312,9 @@ RISK_PROFILES: Dict[str, Dict[str, Any]] = {
     },
     "yolo": {
         "label": "梭哈",
-        "position_multiplier": 1.8,
-        "cash_multiplier": 0.1,
-        "trades_multiplier": 2.0,
+        "position_multiplier": 1.6,
+        "cash_multiplier": 0.4,
+        "trades_multiplier": 1.8,
         "slippage_delta": 0.002,
         "style": (
             "这一轮按梭哈档来：额度几乎拉满，允许重仓、允许看错，亏的也是模拟盘，图的就是这个；"
@@ -256,6 +324,30 @@ RISK_PROFILES: Dict[str, Dict[str, Any]] = {
 }
 
 # 绝对上限：档位再怎么调也越不过去，避免一把梭到账户当天失去观赏价值
+_ORDER_CLOSED_MARKERS = ("已成", "已成交", "已撤", "部撤", "废单", "filled", "cancel", "reject")
+
+
+def _order_code(row: Dict[str, Any]) -> str:
+    """委托记录里的股票代码。"""
+
+    return str(row.get("stockCode") or row.get("code") or "").strip()
+
+
+def _is_open_buy_order(row: Dict[str, Any]) -> bool:
+    """这笔委托还挂着、且是买入方向。
+
+    状态字段认不出来时按「还挂着」处理：宁可这一轮不重复买，也不要因为判错而重复占用资金。
+    """
+
+    direction = str(row.get("direction") or row.get("orderDrt") or "").lower()
+    if "买" not in direction and "buy" not in direction:
+        return False
+    status = str(row.get("status") or "").lower()
+    return not any(marker in status for marker in _ORDER_CLOSED_MARKERS)
+
+
+REQUIRED_PROMPT_PLACEHOLDERS = ("{header}", "{max_position_pct}", "{min_cash_pct}")
+
 HARD_MAX_POSITION_RATIO = 0.40
 HARD_MAX_TRADES_PER_DAY = 12
 
@@ -329,6 +421,7 @@ class SimTraderPlugin(MaiBotPlugin):
         self._state = StateStore(data_dir / "state.json")
         self._watchlist.load()
         self._state.load()
+        self._validate_prompt_template()
         await self._load_persona()
         self.ctx.logger.info(
             "模拟盘已加载：池子 %d 只，数据目录 %s",
@@ -337,6 +430,17 @@ class SimTraderPlugin(MaiBotPlugin):
         )
         self._warn_if_not_configured()
         await self._restart_loop()
+
+    def _validate_prompt_template(self) -> None:
+        """检查提示词模板的必需占位符；缺了直接报错，不静默退回默认模板。"""
+
+        template = self.config.prompt.system_template
+        missing = [item for item in REQUIRED_PROMPT_PLACEHOLDERS if item not in template]
+        if missing:
+            raise RuntimeError(
+                f"[prompt] system_template 缺少必需的占位符: {', '.join(missing)}；"
+                "至少要保留 {header}、{max_position_pct}、{min_cash_pct}"
+            )
 
     def _warn_if_not_configured(self) -> None:
         """首次下载后最容易漏填的几项一次性说清楚，别让用户以为插件坏了。"""
@@ -455,11 +559,16 @@ class SimTraderPlugin(MaiBotPlugin):
         """按配置取当前风险档；写错了直接报错，不静默退回默认档。"""
 
         name = str(self.config.risk.profile or "").strip().lower()
-        profile = RISK_PROFILES.get(name)
-        if profile is None:
+        if name not in RISK_PROFILES:
             raise RuntimeError(
                 f"[risk] profile 只支持 {' / '.join(RISK_PROFILES)}，当前为 {self.config.risk.profile!r}"
             )
+        # 档位只是预设，[risk] 里逐项填了就以填的为准（None 表示沿用预设）
+        profile = dict(RISK_PROFILES[name])
+        for key in ("position_multiplier", "cash_multiplier", "trades_multiplier", "slippage_delta"):
+            override = getattr(self.config.risk, key)
+            if override is not None:
+                profile[key] = float(override)
         return profile
 
     def _effective_limits(self) -> Dict[str, float]:
@@ -636,6 +745,7 @@ class SimTraderPlugin(MaiBotPlugin):
                 decision=decision,
                 balance=balance,
                 positions=holdings,
+                orders=orders,
                 quotes=quotes,
                 today=today,
                 state=state,
@@ -787,33 +897,65 @@ class SimTraderPlugin(MaiBotPlugin):
             risk_style=str(self._risk_profile()["style"]),
             max_position_pct=f"{limits['max_position_ratio']:.0%}",
             min_cash_pct=f"{limits['min_cash_reserve_ratio']:.0%}",
+            system_template=self.config.prompt.system_template,
         )
-        result = await self._llm_generate(
-            messages=messages,
-            task_name=self.config.model.decision_task_name,
-            model_name=self.config.model.decision_model,
-            temperature=self.config.model.temperature,
-            max_tokens=self.config.model.max_tokens,
-        )
-        if not result.get("success"):
-            raise RuntimeError(self._llm_failure_hint(result))
-        text = str(result.get("response") or "")
-        if not text.strip():
-            # 思考型模型会把额度全花在 reasoning 上，正文一空就必然是 max_tokens 不够
-            reasoning_chars = len(str(result.get("reasoning") or ""))
-            raise RuntimeError(
-                f"模型只输出了思考过程（{reasoning_chars} 字）没有正文，"
-                f"把 [model] max_tokens 调大试试（当前 {self.config.model.max_tokens}）"
+        last_error: Optional[str] = None
+        for attempt in range(1, DECISION_PARSE_ATTEMPTS + 1):
+            result = await self._llm_generate(
+                messages=messages,
+                task_name=self.config.model.decision_task_name,
+                model_name=self.config.model.decision_model,
+                temperature=self.config.model.temperature,
+                max_tokens=self.config.model.max_tokens,
             )
-        decision = parse_decision(text)
-        self.ctx.logger.info(
-            "决策完成：心情=%s 动作=%d 下次=%d 分钟 理由=%s",
-            decision.mood,
-            len(decision.actions),
-            decision.next_check_minutes,
-            decision.reasoning,
-        )
-        return decision
+            if not result.get("success"):
+                raise RuntimeError(self._llm_failure_hint(result))
+            text = str(result.get("response") or "")
+            if not text.strip():
+                # 思考型模型会把额度全花在 reasoning 上，正文一空就必然是 max_tokens 不够
+                reasoning_chars = len(str(result.get("reasoning") or ""))
+                raise RuntimeError(
+                    f"模型只输出了思考过程（{reasoning_chars} 字）没有正文，"
+                    f"把 [model] max_tokens 调大试试（当前 {self.config.model.max_tokens}）"
+                )
+            try:
+                decision = parse_decision(text)
+            except DecisionParseError as exc:
+                last_error = str(exc)
+                # 原始输出必须落日志：只报"解析失败"没法判断是模型写坏了还是字段名变了
+                self.ctx.logger.error(
+                    "决策解析失败（第 %s/%s 次）：%s｜原始输出=%r",
+                    attempt,
+                    DECISION_PARSE_ATTEMPTS,
+                    exc,
+                    text[:600],
+                )
+                if attempt == DECISION_PARSE_ATTEMPTS:
+                    break
+                # 追加一次纠正提示再试：模型偶尔只是多写了说明文字或多一个逗号
+                base_messages = messages
+                messages = [
+                    *base_messages,
+                    {"role": "assistant", "content": text[:600]},
+                    {
+                        "role": "user",
+                        "content": (
+                            f"上一次输出解析失败：{exc}。"
+                            "只输出一个 JSON 对象，不要 markdown 代码块、不要任何解释文字，"
+                            "字段名与取值范围严格按前面的要求来。"
+                        ),
+                    },
+                ]
+                continue
+            self.ctx.logger.info(
+                "决策完成：心情=%s 动作=%d 下次=%d 分钟 理由=%s",
+                decision.mood,
+                len(decision.actions),
+                decision.next_check_minutes,
+                decision.reasoning,
+            )
+            return decision
+        raise RuntimeError(f"模型连续 {DECISION_PARSE_ATTEMPTS} 次没给出可解析的决策，这一轮放弃：{last_error}")
 
     async def _execute_decision(
         self,
@@ -821,6 +963,7 @@ class SimTraderPlugin(MaiBotPlugin):
         decision: Decision,
         balance: Dict[str, Any],
         positions: Dict[str, Holding],
+        orders: Sequence[Dict[str, Any]],
         quotes: Dict[str, Quote],
         today: str,
         state: RuntimeState,
@@ -853,6 +996,12 @@ class SimTraderPlugin(MaiBotPlugin):
 
         total_assets = _to_float(balance.get("totalAssets"))
         available_cash = _to_float(balance.get("availBalance"))
+        account = self.config.account
+        # 轮首的 holding.market_value 不会随本轮成交更新：同一只票连买两次会各按旧市值算，
+        # 单票上限就被顶穿了。这里累计本轮已经买掉的金额。
+        pending_buy_value: Dict[str, float] = {}
+        # 还挂着的买单也要挡住：未成交的委托既不进持仓也不在行情里，重下一笔等于重复占用资金
+        open_buy_codes = {_order_code(row) for row in orders if _is_open_buy_order(row)} - {""}
         # 风险档在这里落到具体数字上：档位只调倍数，绝对上限仍由代码夹住
         limits = self._effective_limits()
 
@@ -874,7 +1023,12 @@ class SimTraderPlugin(MaiBotPlugin):
             price = limit_price(quote.price, direction=action.action, slippage=limits["slippage"])
             holding = find_holding(positions, action.code)
             if action.action == "buy":
-                position_value = holding.market_value if holding else 0.0
+                if action.code in open_buy_codes:
+                    notes.append(f"{action.name}({action.code}) 还有没成交的买单挂着，这轮先不重复下单")
+                    continue
+                position_value = (holding.market_value if holding else 0.0) + pending_buy_value.get(
+                    action.code, 0.0
+                )
                 quantity = resolve_quantity(
                     requested=action.quantity,
                     price=price,
@@ -883,6 +1037,8 @@ class SimTraderPlugin(MaiBotPlugin):
                     current_position_value=position_value,
                     max_position_ratio=limits["max_position_ratio"],
                     min_cash_reserve_ratio=limits["min_cash_reserve_ratio"],
+                    buy_fee_rate=account.buy_fee_rate,
+                    min_commission=account.min_commission,
                 )
                 if quantity is None:
                     notes.append(f"想买 {action.name}，但资金或仓位不够，没买")
@@ -890,7 +1046,13 @@ class SimTraderPlugin(MaiBotPlugin):
             else:
                 available_qty = holding.available if holding else 0
                 quantity = int(action.quantity // LOT_SIZE) * LOT_SIZE
-                verdict = check_sell(quantity=quantity, available_quantity=available_qty)
+                verdict = check_sell(
+                    quantity=quantity,
+                    available_quantity=available_qty,
+                    price=price,
+                    sell_fee_rate=account.sell_fee_rate,
+                    min_commission=account.min_commission,
+                )
                 if not verdict.ok:
                     notes.append(f"想卖 {action.name}：{verdict.reason}")
                     continue
@@ -901,6 +1063,7 @@ class SimTraderPlugin(MaiBotPlugin):
                 notes.append(f"（试跑）会{verb} {action.name}({action.code}) {quantity}股 @{price:.2f}")
                 if action.action == "buy":
                     available_cash -= price * quantity
+                    pending_buy_value[action.code] = pending_buy_value.get(action.code, 0.0) + price * quantity
                 continue
 
             try:
@@ -924,6 +1087,7 @@ class SimTraderPlugin(MaiBotPlugin):
             self.ctx.logger.info("下单成功 %s %s %d股 @%.2f", action.action, action.code, quantity, price)
             if action.action == "buy":
                 available_cash -= price * quantity
+                pending_buy_value[action.code] = pending_buy_value.get(action.code, 0.0) + price * quantity
 
         return executed, notes
 

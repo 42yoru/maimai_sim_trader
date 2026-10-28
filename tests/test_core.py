@@ -422,6 +422,29 @@ class LimitsBlockTests(unittest.TestCase):
         self.assertNotIn("空仓", "\n".join(lines))
 
 
+class SellFeeTests(unittest.TestCase):
+    """卖出侧也要看费用：小单卖掉还不如拿着时应该拦住。"""
+
+    def test_tiny_sell_rejected_when_fee_eats_it(self) -> None:
+        verdict = check_sell(quantity=100, available_quantity=100, price=0.03, min_commission=5.0)
+
+        self.assertFalse(verdict.ok)
+        self.assertIn("费用", verdict.reason)
+
+    def test_normal_sell_passes(self) -> None:
+        verdict = check_sell(quantity=100, available_quantity=100, price=50.0, min_commission=5.0)
+
+        self.assertTrue(verdict.ok, verdict.reason)
+
+    def test_fee_uses_higher_of_rate_and_minimum(self) -> None:
+        self.assertAlmostEqual(
+            TRADING.estimated_fee(1000.0, fee_rate=0.0011, min_commission=5.0), 5.0
+        )
+        self.assertAlmostEqual(
+            TRADING.estimated_fee(1_000_000.0, fee_rate=0.0011, min_commission=5.0), 1100.0
+        )
+
+
 class ConfigUiSchemaTests(unittest.TestCase):
     """WebUI 配置页：中文标签、页签、不丢字段。"""
 
