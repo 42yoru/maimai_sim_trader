@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 from datetime import datetime, time as dt_time
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import asyncio
@@ -79,7 +80,7 @@ class PluginSectionConfig(PluginConfigBase):
     __ui_order__ = 0
 
     enabled: bool = Field(default=True, description="是否启用插件")
-    config_version: str = Field(default="0.8.3", description="配置版本")
+    config_version: str = Field(default="0.8.4", description="配置版本")
 
 
 class MxSectionConfig(PluginConfigBase):
@@ -137,6 +138,13 @@ class ScheduleSectionConfig(PluginConfigBase):
     __ui_order__ = 3
 
     enabled: bool = Field(default=True, description="是否自动看盘（关掉后只能手动触发）")
+    timezone: str = Field(
+        default="",
+        description=(
+            "按哪个时区判断交易时段与跨日（例如 Asia/Shanghai）；留空用宿主进程本地时区。"
+            "在容器里跑 UTC 时必须填，否则它在 A 股开盘时会以为闭市"
+        ),
+    )
     sessions: List[str] = Field(
         default_factory=lambda: list(DEFAULT_SESSIONS),
         description="交易时段，格式 HH:MM-HH:MM",
@@ -436,6 +444,7 @@ class SimTraderPlugin(MaiBotPlugin):
         self._state = StateStore(data_dir / "state.json")
         self._watchlist.load()
         self._state.load()
+        self._validate_timezone()
         self._validate_prompt_template()
         await self._load_persona()
         self.ctx.logger.info(
@@ -445,6 +454,29 @@ class SimTraderPlugin(MaiBotPlugin):
         )
         self._warn_if_not_configured()
         await self._restart_loop()
+
+    def _now(self) -> datetime:
+        """当前时间：按 ``[schedule] timezone`` 算，留空用宿主进程本地时区。
+
+        交易时段判断、跨日重置、「收盘复盘」都走这里。容器里默认是 UTC，
+        那套时间在 A 股开盘时段会被判成闭市，整天不开盘也不报错。
+        """
+
+        timezone_name = self.config.schedule.timezone.strip()
+        if not timezone_name:
+            return datetime.now()
+        return datetime.now(ZoneInfo(timezone_name))
+
+    def _validate_timezone(self) -> None:
+        """校验时区名；写错了在加载时就报错，不要让「整天不开盘」变成一个谜。"""
+
+        timezone_name = self.config.schedule.timezone.strip()
+        if not timezone_name:
+            return
+        try:
+            ZoneInfo(timezone_name)
+        except ZoneInfoNotFoundError as exc:
+            raise RuntimeError(f"[schedule] timezone 不是合法时区名: {timezone_name!r}") from exc
 
     def _validate_prompt_template(self) -> None:
         """检查提示词模板的必需占位符；缺了直接报错，不静默退回默认模板。"""
@@ -687,7 +719,7 @@ class SimTraderPlugin(MaiBotPlugin):
 
         if self._round_lock.locked():
             return
-        now = datetime.now()
+        now = self._now()
         store = self._require_state()
         state = store.load()
         today = now.strftime("%Y-%m-%d")
@@ -1500,7 +1532,7 @@ class SimTraderPlugin(MaiBotPlugin):
             return
         self._mark_manual_run(stream_id)
         await self._send(stream_id, f"{self._bot_name or DEFAULT_BOT_NAME}去看一眼盘，稍等一下……")
-        now = datetime.now()
+        now = self._now()
         today = now.strftime("%Y-%m-%d")
         try:
             notes = await self._run_round(now, today, dry_run=True)
@@ -1602,7 +1634,7 @@ class SimTraderPlugin(MaiBotPlugin):
         stream_key = context["stream_id"] or "unknown"
         if self._round_lock.locked():
             return {"success": False, "content": "已经有一轮在看盘了，等它跑完再说。"}
-        now = datetime.now()
+        now = self._now()
         today = now.strftime("%Y-%m-%d")
         cooldown_left = self._manual_cooldown_left(stream_key)
         if cooldown_left > 0:

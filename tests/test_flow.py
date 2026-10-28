@@ -939,6 +939,26 @@ class ComponentTimeoutTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(entries[name]["metadata"].get("timeout_ms"), 240000)
 
 
+class TimezoneContractTests(unittest.IsolatedAsyncioTestCase):
+    """交易时段与跨日必须能锁定时区（容器里默认 UTC 会整天不开盘）。"""
+
+    async def test_now_uses_configured_timezone(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plugin = build_plugin(Path(tmp), overrides={"schedule": {"timezone": "Asia/Shanghai"}})
+
+            now = plugin._now()
+
+            self.assertIsNotNone(now.tzinfo)
+            self.assertEqual(getattr(now.tzinfo, "key", ""), "Asia/Shanghai")
+
+    async def test_invalid_timezone_is_rejected_at_load(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plugin = build_plugin(Path(tmp), overrides={"schedule": {"timezone": "Mars/Olympus"}})
+
+            with self.assertRaises(RuntimeError):
+                plugin._validate_timezone()
+
+
 class LifecycleContractTests(unittest.IsolatedAsyncioTestCase):
     """热更新订阅：不声明的话 bot 分支是死代码。"""
 

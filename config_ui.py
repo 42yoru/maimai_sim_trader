@@ -94,6 +94,7 @@ _SECTIONS: Dict[str, _Section] = {
             "default_interval_minutes": "默认间隔（分钟）",
             "min_interval_minutes": "最短间隔（分钟）",
             "max_interval_minutes": "最长间隔（分钟）",
+            "timezone": "交易时段用的时区",
         },
     ),
     "prompt": _Section(
@@ -195,6 +196,10 @@ _HINTS: Dict[str, str] = {
         "{min_cash_pct} 三个占位符，{limits_notice} 可选；缺了会在加载时报错。"
     ),
     "schedule.sessions": "格式 HH:MM-HH:MM，可以写多段；只在这些时段内自动看盘。",
+    "schedule.timezone": (
+        "按哪个时区判断交易时段与跨日，例如 Asia/Shanghai；留空用宿主进程本地时区。"
+        "在容器里跑 UTC 时必须填，否则它在 A 股开盘时会以为闭市、整天不开盘。"
+    ),
     "schedule.min_interval_minutes": "她自己决定的间隔不会低于这个值。",
     "schedule.max_interval_minutes": "也不会高于这个值；调大可省妙想额度。",
     "schedule.manual_cooldown_seconds": "同一聊天流两次手动看盘（/股 试跑、review 工具）的最小间隔；设成 0 等于关掉冷却。",
