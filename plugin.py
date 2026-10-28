@@ -60,7 +60,7 @@ class PluginSectionConfig(PluginConfigBase):
     __ui_order__ = 0
 
     enabled: bool = Field(default=True, description="是否启用插件")
-    config_version: str = Field(default="0.7.7", description="配置版本")
+    config_version: str = Field(default="0.7.8", description="配置版本")
 
 
 class MxSectionConfig(PluginConfigBase):
@@ -866,6 +866,10 @@ class SimTraderPlugin(MaiBotPlugin):
             quote = quotes.get(action.code)
             if quote is None:
                 notes.append(f"{action.name}({action.code}) 没有行情，跳过")
+                continue
+            if quote.suspended:
+                # 停牌票的 price 是用昨收顶上来避免除零的，拿它算限价去下单等于赌一个不存在的成交
+                notes.append(f"{action.name}({action.code}) 停牌中，跳过")
                 continue
             price = limit_price(quote.price, direction=action.action, slippage=limits["slippage"])
             holding = find_holding(positions, action.code)

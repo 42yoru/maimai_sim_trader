@@ -10,10 +10,13 @@ from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional
 
 import httpx
+import logging
 
 SNAPSHOT_URL = "https://qt.gtimg.cn/q="
 # 腾讯返回 GBK，且一次最多几十只比较稳
 MAX_BATCH = 40
+
+logger = logging.getLogger("maimai_sim_trader.quotes")
 
 
 class QuoteError(RuntimeError):
@@ -38,6 +41,8 @@ class Quote:
     turnover_rate: float
     pe: float
     updated_at: str
+    # 停牌票：现价为 0，price 只是用昨收顶上来的参考值，不能拿去下单
+    suspended: bool = False
 
     def to_brief(self) -> str:
         """拼成一行给模型看的摘要。"""
@@ -66,40 +71,68 @@ def _to_float(value: str, *, field: str, code: str) -> float:
 
 
 def parse_snapshot(text: str) -> Dict[str, Quote]:
-    """解析腾讯快照报文。"""
+    """解析腾讯快照报文。
+
+    单只票解析失败（字段数异常、数值格式变化）只跳过并留痕：一只坏票不该拖垮整个股票池。
+    但整批都解析不出来时说明字段结构真的变了，照样抛错。
+    """
 
     quotes: Dict[str, Quote] = {}
+    seen = 0
+    failures: List[str] = []
     for line in text.split(";"):
         raw = line.strip()
         if not raw.startswith("v_"):
             continue
-        header, _, body = raw.partition("=")
-        symbol = header[2:].strip()
-        fields = body.strip().strip('"').split("~")
-        if len(fields) < 40:
-            raise QuoteError(f"{symbol} 的字段数量异常：{len(fields)}")
-        code = fields[2].strip()
-        price = _to_float(fields[3], field="现价", code=code)
-        if price <= 0:
-            # 停牌时现价为 0，用昨收代替，避免后续除零
-            price = _to_float(fields[4], field="昨收", code=code)
-        quotes[code] = Quote(
-            code=code,
-            name="".join(fields[1].split()),
-            price=price,
-            prev_close=_to_float(fields[4], field="昨收", code=code),
-            open_price=_to_float(fields[5], field="今开", code=code),
-            high=_to_float(fields[33], field="最高", code=code),
-            low=_to_float(fields[34], field="最低", code=code),
-            change=_to_float(fields[31], field="涨跌", code=code),
-            change_pct=_to_float(fields[32], field="涨跌幅", code=code),
-            volume_lots=_to_float(fields[6], field="成交量", code=code),
-            turnover_wan=_to_float(fields[37], field="成交额", code=code),
-            turnover_rate=_to_float(fields[38], field="换手率", code=code),
-            pe=_to_float(fields[39], field="市盈率", code=code),
-            updated_at=fields[30].strip(),
-        )
+        if raw.startswith("v_pv_none_match"):
+            # 腾讯对「查不到的代码」单独回这一行：同样以 v_ 开头、字段很少，但这是这一只票
+            # 没数据，不是整批请求失败（股票池是模型可以自己改的，一条幻觉代码不该让全天停摆）
+            logger.warning("腾讯快照查不到 %s 的数据（代码不存在或已退市），已跳过", raw.partition("=")[2].strip())
+            continue
+        seen += 1
+        try:
+            quote = _parse_snapshot_line(raw)
+        except QuoteError as exc:
+            logger.warning("跳过一只行情: %s", exc)
+            failures.append(str(exc))
+            continue
+        quotes[quote.code] = quote
+    if seen and not quotes:
+        raise QuoteError("整批行情都无法解析，字段结构可能变了: " + "; ".join(failures[:3]))
     return quotes
+
+
+def _parse_snapshot_line(raw: str) -> Quote:
+    """解析单行腾讯快照。"""
+
+    header, _, body = raw.partition("=")
+    symbol = header[2:].strip()
+    fields = body.strip().strip('"').split("~")
+    if len(fields) < 40:
+        raise QuoteError(f"{symbol} 的字段数量异常：{len(fields)}")
+    code = fields[2].strip()
+    price = _to_float(fields[3], field="现价", code=code)
+    suspended = price <= 0
+    if suspended:
+        # 停牌时现价为 0，用昨收顶上来避免后续除零；但标记出来，下单前会被跳过
+        price = _to_float(fields[4], field="昨收", code=code)
+    return Quote(
+        code=code,
+        name="".join(fields[1].split()),
+        price=price,
+        prev_close=_to_float(fields[4], field="昨收", code=code),
+        open_price=_to_float(fields[5], field="今开", code=code),
+        high=_to_float(fields[33], field="最高", code=code),
+        low=_to_float(fields[34], field="最低", code=code),
+        change=_to_float(fields[31], field="涨跌", code=code),
+        change_pct=_to_float(fields[32], field="涨跌幅", code=code),
+        volume_lots=_to_float(fields[6], field="成交量", code=code),
+        turnover_wan=_to_float(fields[37], field="成交额", code=code),
+        turnover_rate=_to_float(fields[38], field="换手率", code=code),
+        pe=_to_float(fields[39], field="市盈率", code=code),
+        updated_at=fields[30].strip(),
+        suspended=suspended,
+    )
 
 
 class TencentQuoteClient:

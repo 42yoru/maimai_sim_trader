@@ -67,22 +67,31 @@ def _scaled_amount(row: Dict[str, Any], keys: Iterable[str], dec_keys: Iterable[
         return number
 
 
-def _as_int(value: Any) -> int:
-    """尽量转整数。"""
+def _as_int(value: Any, *, field: str) -> int:
+    """转整数：字段缺失按 0，值无法解析直接报错。
 
+    区分「妙想没给这个字段」和「给了但格式变了」：后者折成 0 会让 quantity / market_value
+    静默变 0，单票仓位上限与可卖数量校验一起失效，而且下面那些 `quantity > 0` 才触发的告警
+    一条都不会打出来。
+    """
+
+    if value is None or value == "":
+        return 0
     try:
         return int(float(value))
-    except (TypeError, ValueError):
-        return 0
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"持仓字段 {field} 无法转成整数: {value!r}") from exc
 
 
-def _as_float(value: Any) -> float:
-    """尽量转浮点。"""
+def _as_float(value: Any, *, field: str) -> float:
+    """转浮点，口径同 :func:`_as_int`。"""
 
+    if value is None or value == "":
+        return 0.0
     try:
         return float(value)
-    except (TypeError, ValueError):
-        return 0.0
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"持仓字段 {field} 无法转成浮点: {value!r}") from exc
 
 
 @dataclass(frozen=True)
@@ -119,9 +128,9 @@ def parse_holdings(rows: Iterable[Dict[str, Any]]) -> Dict[str, Holding]:
             raise ValueError(f"持仓条目缺少股票代码，字段名可能变了: {sorted(row.keys())}")
         code = str(raw_code).strip()
         name = str(_first_present(row, NAME_KEYS) or code).strip()
-        quantity = _as_int(_first_present(row, QUANTITY_KEYS))
+        quantity = _as_int(_first_present(row, QUANTITY_KEYS), field="quantity")
         raw_available = _first_present(row, AVAILABLE_KEYS)
-        available = _as_int(raw_available)
+        available = _as_int(raw_available, field="available")
         if quantity > 0 and raw_available is None:
             # 字段完全缺失才值得警告；值为 0 是 T+1 的正常状态
             logger.warning(
@@ -132,8 +141,8 @@ def parse_holdings(rows: Iterable[Dict[str, Any]]) -> Dict[str, Holding]:
             )
         avg_cost = _scaled_amount(row, COST_KEYS, COST_DEC_KEYS)
         current_price = _scaled_amount(row, PRICE_KEYS, PRICE_DEC_KEYS)
-        market_value = _as_float(_first_present(row, VALUE_KEYS))
-        profit = _as_float(_first_present(row, PROFIT_KEYS))
+        market_value = _as_float(_first_present(row, VALUE_KEYS), field="market_value")
+        profit = _as_float(_first_present(row, PROFIT_KEYS), field="profit")
         if quantity > 0 and available <= 0:
             logger.warning(
                 "持仓 %s 数量 %d 但可卖数量解析为 0，字段名可能变了（现有键：%s）",

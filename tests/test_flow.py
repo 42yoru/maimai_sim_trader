@@ -156,6 +156,29 @@ class FakeHarness:
         raise AssertionError(f"未预期的能力调用: {capability}")
 
 
+def _quotes_with_suspended(code: str) -> Any:
+    """假行情，但把某只票标成停牌（现价 0，price 用昨收顶上）。"""
+
+    stamp = f"{datetime.now().strftime('%Y%m%d')}100000"
+    base = FakeQuotes()
+
+    class SuspendedQuotes:
+        async def fetch(self, codes: Any) -> Dict[str, Any]:
+            snapshot = await base.fetch(codes)
+            result: Dict[str, Any] = {}
+            for item_code, quote in snapshot.items():
+                patched = replace(quote, updated_at=stamp)
+                if item_code == code:
+                    patched = replace(patched, suspended=True)
+                result[item_code] = patched
+            return result
+
+        async def close(self) -> None:
+            return None
+
+    return SuspendedQuotes()
+
+
 def _quotes_stamped_today() -> Any:
     """假行情，但把快照日期改成今天。
 
@@ -236,6 +259,24 @@ class RoundFlowTests(unittest.IsolatedAsyncioTestCase):
             await plugin._run_round(datetime(2026, 10, 19, 10, 0), "2026-10-19", dry_run=True)
 
             self.assertEqual(harness.llm_args[0]["max_tokens"], 6000)
+
+    async def test_suspended_stock_is_not_traded(self) -> None:
+        """停牌票的 price 是昨收顶替的，不能拿它算限价去下单。"""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            plugin = build_plugin(Path(tmp))
+            harness = FakeHarness()
+            plugin.ctx._rpc_call = harness.rpc
+            plugin.config.schedule.sessions = _session_covering(datetime.now())
+            plugin._quotes = _quotes_with_suspended("601899")
+
+            notes = await plugin._run_round(
+                datetime.now(), datetime.now().strftime("%Y-%m-%d"), announce=False
+            )
+
+            placed_codes = [item["code"] for item in plugin._mx.placed]
+            self.assertNotIn("601899", placed_codes)
+            self.assertTrue(any("停牌" in line for line in notes), notes)
 
     async def test_snapshot_uses_account_after_trades(self) -> None:
         """播报用的是成交后重取的账户，不是下单前那份快照。

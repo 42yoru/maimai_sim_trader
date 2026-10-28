@@ -43,6 +43,7 @@ TRADING = sys.modules[f"{MODULE_NAME}.trading"]
 WATCHLIST = sys.modules[f"{MODULE_NAME}.watchlist"]
 POSITIONS = sys.modules[f"{MODULE_NAME}.positions"]
 QUERY_ARGS = sys.modules[f"{MODULE_NAME}.query_args"]
+QUOTES = sys.modules[f"{MODULE_NAME}.quotes"]
 PLUGIN_MODULE = sys.modules[MODULE_NAME]
 
 DecisionParseError = DECISION.DecisionParseError
@@ -57,6 +58,7 @@ round_lots = TRADING.round_lots
 DEFAULT_POOL = WATCHLIST.DEFAULT_POOL
 WatchlistStore = WATCHLIST.WatchlistStore
 parse_holdings = POSITIONS.parse_holdings
+parse_snapshot = QUOTES.parse_snapshot
 parse_stock_query = QUERY_ARGS.parse_stock_query
 parse_rate_argument = QUERY_ARGS.parse_rate_argument
 QueryParseError = QUERY_ARGS.QueryParseError
@@ -513,6 +515,19 @@ class WatchlistTests(unittest.TestCase):
 class HoldingTests(unittest.TestCase):
     """持仓字段适配：字段名一变就得认出来，认不出就报错。"""
 
+    def test_unparseable_quantity_raises(self) -> None:
+        """数量格式变了（如 "1,500"）必须报错：折成 0 会让单票仓位上限静默失效。"""
+
+        with self.assertRaises(ValueError):
+            parse_holdings([{"stockCode": "600036", "quantity": "1,500", "availableQty": 500}])
+
+    def test_missing_quantity_is_zero(self) -> None:
+        """字段完全缺失仍按 0 处理（妙想少给字段不等于格式变了）。"""
+
+        holdings = parse_holdings([{"stockCode": "600036", "availableQty": 500}])
+
+        self.assertEqual(holdings["600036"].quantity, 0)
+
     def test_standard_shape(self) -> None:
         holdings = parse_holdings(
             [
@@ -720,3 +735,49 @@ class StateTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def _snapshot_line(code: str, *, price: float = 10.0, prev_close: float = 9.9) -> str:
+    """构造一行合法的腾讯快照（40 个字段，下标与 quotes.py 一致）。"""
+
+    fields = ["1", "测试票", code, f"{price}", f"{prev_close}", "9.95", "1234"]
+    while len(fields) < 30:
+        fields.append("0")
+    fields.append("20261028103000")  # 30 时间
+    fields.append("0.1")  # 31 涨跌
+    fields.append("1.01")  # 32 涨跌幅
+    fields.append("10.5")  # 33 最高
+    fields.append("9.8")  # 34 最低
+    while len(fields) < 37:
+        fields.append("0")
+    fields.append("1234")  # 37 成交额
+    fields.append("2.5")  # 38 换手率
+    fields.append("15.0")  # 39 市盈率
+    return f'v_sz{code}="{"~".join(fields)}";'
+
+
+class QuoteParseTests(unittest.TestCase):
+    """一只坏票不该拖垮整个股票池，但全坏了必须报错。"""
+
+    def test_none_match_symbol_does_not_break_batch(self) -> None:
+        """腾讯对查不到的代码回 v_pv_none_match，不能当成整批失败。"""
+
+        quotes = parse_snapshot(_snapshot_line("600036") + ';v_pv_none_match="1";')
+
+        self.assertEqual(list(quotes), ["600036"])
+
+    def test_one_broken_symbol_does_not_break_batch(self) -> None:
+        quotes = parse_snapshot(_snapshot_line("600036") + 'v_sz000001="1~2~3";')
+
+        self.assertEqual(list(quotes), ["600036"])
+
+    def test_all_broken_raises(self) -> None:
+        with self.assertRaises(QUOTES.QuoteError):
+            parse_snapshot('v_sz000001="1~2~3";')
+
+    def test_suspended_flag_when_price_is_zero(self) -> None:
+        quotes = parse_snapshot(_snapshot_line("600036", price=0.0))
+
+        self.assertTrue(quotes["600036"].suspended)
+        # 现价 0 时用昨收顶上，避免后续除零，但这条不能拿去下单
+        self.assertAlmostEqual(quotes["600036"].price, 9.9)
