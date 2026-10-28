@@ -36,6 +36,14 @@ from .trading import LOT_SIZE, check_sell, limit_price, resolve_quantity
 from .watchlist import WatchlistStore, is_valid_code
 
 LOGGER_NAME = "maimai.sim-trader"
+COMPONENT_TIMEOUT_MS = 240000
+"""长耗时组件（/股 试跑、sim_trader_review）的 RPC 超时。
+
+宿主对 Command/Tool 的默认 RPC 超时是 60 秒，而跑完整一轮要 4 次外部请求 + 最长
+`model.request_timeout_ms`（默认 180 秒）的模型调用；不显式声明会让宿主先判超时，
+runner 里那一轮却还在继续、还会真实下单。
+"""
+
 DEFAULT_BOT_NAME = "麦麦"
 DEFAULT_SESSIONS = ("09:30-11:30", "13:00-15:00")
 TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
@@ -52,7 +60,7 @@ class PluginSectionConfig(PluginConfigBase):
     __ui_order__ = 0
 
     enabled: bool = Field(default=True, description="是否启用插件")
-    config_version: str = Field(default="0.7.6", description="配置版本")
+    config_version: str = Field(default="0.7.7", description="配置版本")
 
 
 class MxSectionConfig(PluginConfigBase):
@@ -306,7 +314,8 @@ class SimTraderPlugin(MaiBotPlugin):
         self._private_stream_cache: Dict[str, str] = {}
         self._bot_name = ""
         self._bot_persona = ""
-        self._busy = False
+        # 一轮看盘的互斥锁：布尔标志在「读-置」之间有 await 窗口，两轮会同时跑起来
+        self._round_lock = asyncio.Lock()
         # 手动触发的手动看盘冷却：{聊天流: 上次触发时间}
         self._manual_runs: Dict[str, float] = {}
 
@@ -552,7 +561,7 @@ class SimTraderPlugin(MaiBotPlugin):
     async def _tick(self) -> None:
         """判断这一分钟该不该干活。"""
 
-        if self._busy:
+        if self._round_lock.locked():
             return
         now = datetime.now()
         store = self._require_state()
@@ -588,9 +597,11 @@ class SimTraderPlugin(MaiBotPlugin):
         announce=False 时照常下单，但不往群里播报（供聊天里的工具调用使用）。
         """
 
-        # 记下进来之前的状态：并发跑两轮时，先结束的那个不该把还在跑的那轮标志清掉
-        was_busy = self._busy
-        self._busy = True
+        # 用真正的互斥锁而不是布尔标志：两轮并发会各自用轮首那一份可用资金，
+        # 同一笔钱被花两次，当日笔数上限也一起失效。
+        if self._round_lock.locked():
+            raise RuntimeError("已经有一轮在看盘了，不能并发再跑一轮")
+        await self._round_lock.acquire()
         store = self._require_state()
         state = store.load()
         # 聊天触发的看盘不走 _tick，这里也要跨日重置，否则「今天已下几笔」会一直累加
@@ -621,7 +632,7 @@ class SimTraderPlugin(MaiBotPlugin):
                 orders=orders,
                 quotes=quotes,
             )
-            executed, round_notes, snapshot_lines = await self._execute_decision(
+            executed, round_notes = await self._execute_decision(
                 decision=decision,
                 balance=balance,
                 positions=holdings,
@@ -630,6 +641,12 @@ class SimTraderPlugin(MaiBotPlugin):
                 state=state,
                 dry_run=dry_run,
             )
+            if executed > 0:
+                # 成交后重取一次账户：否则播报里的「账户现状」还是下单前的，
+                # 会出现「刚买了三成仓，播报却写持仓市值 0.00 / 当前空仓」的自相矛盾
+                balance = await mx.get_balance()
+                holdings = parse_holdings(await mx.get_positions())
+            snapshot_lines = build_snapshot_lines(balance, list(holdings.values()))
             if dry_run:
                 return round_notes
             interval = max(
@@ -654,7 +671,7 @@ class SimTraderPlugin(MaiBotPlugin):
                 )
             return round_notes
         finally:
-            self._busy = was_busy
+            self._round_lock.release()
 
     async def _fetch_pool_quotes(self) -> Dict[str, Quote]:
         """拉股票池的实时快照。
@@ -904,8 +921,7 @@ class SimTraderPlugin(MaiBotPlugin):
             if action.action == "buy":
                 available_cash -= price * quantity
 
-        snapshot_lines = build_snapshot_lines(balance, list(positions.values()))
-        return executed, notes, snapshot_lines
+        return executed, notes
 
     def _account_label(self, balance: Dict[str, Any]) -> str:
         """账户显示名：配置优先，留空就用妙想返回的组合名。"""
@@ -1079,6 +1095,10 @@ class SimTraderPlugin(MaiBotPlugin):
         "stock",
         description="模拟盘：查账户、池子、委托、最近记录，查单只票行情，或增删池子与调整看盘节奏",
         pattern=r"(?s)^/(?:股|stock)(?![0-9A-Za-z_])(?P<rest>.*)$",
+        # /股 试跑要跑完整一轮（4 次外部请求 + 最长 request_timeout_ms 的模型调用），
+        # 宿主对组件的 RPC 默认 60 秒；不声明的话用户会先看到「失败」，而 runner 里那一轮
+        # 还在继续跑、还会真实下单
+        timeout_ms=COMPONENT_TIMEOUT_MS,
     )
     async def handle_stock(self, **kwargs: Any) -> Tuple[bool, Optional[str], bool]:
         """处理 /股 系列命令。"""
@@ -1282,7 +1302,7 @@ class SimTraderPlugin(MaiBotPlugin):
     async def _handle_dry_run(self, stream_id: str) -> None:
         """立刻跑一轮决策，但不下单、不播报、不写状态。"""
 
-        if self._busy:
+        if self._round_lock.locked():
             await self._send(stream_id, "已经有一轮在看盘了，等它跑完再说。")
             return
         cooldown_left = self._manual_cooldown_left(stream_id)
@@ -1371,6 +1391,7 @@ class SimTraderPlugin(MaiBotPlugin):
 
     @Tool(
         "sim_trader_review",
+        timeout_ms=COMPONENT_TIMEOUT_MS,
         description=(
             "让模拟盘此刻重新看一次盘并自行决定买不买、卖不卖。"
             "交易时段内会真实下单到模拟盘（不额外播报），闭市时只做决策不下单；"
@@ -1390,7 +1411,7 @@ class SimTraderPlugin(MaiBotPlugin):
 
         context = self._invocation_context(kwargs)
         stream_key = context["stream_id"] or "unknown"
-        if self._busy:
+        if self._round_lock.locked():
             return {"success": False, "content": "已经有一轮在看盘了，等它跑完再说。"}
         now = datetime.now()
         today = now.strftime("%Y-%m-%d")

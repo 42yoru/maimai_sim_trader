@@ -237,6 +237,50 @@ class RoundFlowTests(unittest.IsolatedAsyncioTestCase):
 
             self.assertEqual(harness.llm_args[0]["max_tokens"], 6000)
 
+    async def test_snapshot_uses_account_after_trades(self) -> None:
+        """播报用的是成交后重取的账户，不是下单前那份快照。
+
+        否则空仓建仓那一轮会在群里写「持仓市值 0.00 元 / 当前空仓」，正文却说刚买了三成仓。
+        """
+
+        with tempfile.TemporaryDirectory() as tmp:
+            plugin = build_plugin(Path(tmp))
+            harness = FakeHarness()
+
+            class CountingMx(FakeMx):
+                """第一次查账户是空仓，下过单之后返回成交后的账户。"""
+
+                def __init__(self) -> None:
+                    super().__init__()
+                    self.balance_calls = 0
+
+                async def get_balance(self) -> Dict[str, Any]:
+                    self.balance_calls += 1
+                    data = await super().get_balance()
+                    if self.placed:
+                        return {**data, "availBalance": 900000.0, "totalPosValue": 100000.0, "totalPosPct": 10.0}
+                    return data
+
+            plugin._mx = CountingMx()
+
+            async def rpc(method: str, plugin_id: str, payload: Dict[str, Any], timeout_ms: Optional[int] = None) -> Any:
+                if payload["capability"] == "llm.generate" and len(harness.llm_prompts) >= 1:
+                    harness.llm_prompts.append(payload["args"].get("prompt"))
+                    return {"success": True, "response": "先伸一只脚试试水～", "reasoning": "", "model": "fake"}
+                return await harness.rpc(method, plugin_id, payload, timeout_ms=timeout_ms)
+
+            plugin.ctx._rpc_call = rpc
+
+            await plugin._run_round(datetime(2026, 10, 19, 10, 0), "2026-10-19")
+
+            self.assertEqual(len(plugin._mx.placed), 2)
+            # 轮首一次 + 成交后重取一次
+            self.assertGreaterEqual(plugin._mx.balance_calls, 2)
+            prompt_text = "\n".join(str(item.get("content", "")) for item in harness.llm_prompts[-1])
+            # 播报 prompt 里的账户快照必须是成交后的：可用资金 90 万、仓位 10%
+            self.assertIn("900,000", prompt_text)
+            self.assertIn("10.00%", prompt_text)
+
     async def test_live_round_places_orders_and_broadcasts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             plugin = build_plugin(Path(tmp))
@@ -724,25 +768,40 @@ class ManualTriggerGateTests(unittest.IsolatedAsyncioTestCase):
             plugin = build_plugin(Path(tmp))
             harness = FakeHarness()
             plugin.ctx._rpc_call = harness.rpc
-            plugin._busy = True
-
-            await plugin._handle_dry_run(GROUP_SESSION)
+            await plugin._round_lock.acquire()
+            try:
+                await plugin._handle_dry_run(GROUP_SESSION)
+            finally:
+                plugin._round_lock.release()
 
             self.assertEqual(harness.llm_prompts, [])
             self.assertTrue(any("已经有一轮在看盘" in item["text"] for item in harness.sent), harness.sent)
 
-    async def test_round_restores_previous_busy_flag(self) -> None:
-        """一轮结束时只恢复自己进来前的状态，不把并发那轮的标志清掉。"""
+    async def test_round_refuses_when_lock_held(self) -> None:
+        """另一轮占着锁时，第二轮直接拒绝——布尔标志在「读-置」之间隔着 await，会放过并发。"""
 
         with tempfile.TemporaryDirectory() as tmp:
             plugin = build_plugin(Path(tmp))
             plugin.config.schedule.sessions = _session_covering(datetime.now())
             plugin._quotes = _quotes_stamped_today()
-            plugin._busy = True
+            await plugin._round_lock.acquire()
+            try:
+                with self.assertRaises(RuntimeError):
+                    await plugin._run_round(datetime.now(), datetime.now().strftime("%Y-%m-%d"), dry_run=True)
+            finally:
+                plugin._round_lock.release()
+
+    async def test_round_releases_lock_afterwards(self) -> None:
+        """一轮跑完（无论成败）都要释放锁，否则后台循环会永久停摆。"""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            plugin = build_plugin(Path(tmp))
+            plugin.config.schedule.sessions = _session_covering(datetime.now())
+            plugin._quotes = _quotes_stamped_today()
 
             await plugin._run_round(datetime.now(), datetime.now().strftime("%Y-%m-%d"), dry_run=True)
 
-            self.assertTrue(plugin._busy)
+            self.assertFalse(plugin._round_lock.locked())
 
 
 class RiskProfileTests(unittest.IsolatedAsyncioTestCase):
@@ -820,6 +879,19 @@ class RiskProfileTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("梭哈", summary)
             self.assertIn("单票≤", summary)
             self.assertIn("每日≤", summary)
+
+
+class ComponentTimeoutTests(unittest.IsolatedAsyncioTestCase):
+    """长耗时组件必须显式声明 RPC 超时（宿主默认 60 秒会先掐断）。"""
+
+    async def test_long_running_components_declare_timeout(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            plugin = build_plugin(Path(tmp))
+            entries = {item["name"]: item for item in plugin.get_components()}
+
+            for name in ("stock", "sim_trader_review"):
+                self.assertIn(name, entries)
+                self.assertEqual(entries[name]["metadata"].get("timeout_ms"), 240000)
 
 
 if __name__ == "__main__":
