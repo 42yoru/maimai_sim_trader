@@ -69,7 +69,7 @@ class PluginSectionConfig(PluginConfigBase):
     __ui_order__ = 0
 
     enabled: bool = Field(default=True, description="是否启用插件")
-    config_version: str = Field(default="0.8.0", description="配置版本")
+    config_version: str = Field(default="0.8.1", description="配置版本")
 
 
 class MxSectionConfig(PluginConfigBase):
@@ -240,6 +240,7 @@ class RiskSectionConfig(PluginConfigBase):
         description=(
             "决策大胆程度：steady 稳健 / aggressive 激进 / yolo 梭哈。"
             "档位以 [account] 里的数字为基准按倍数调整，再夹到代码里的绝对上限；"
+            "档位越高换手越勤、仓位越重，在手续费全额模拟之后也越容易亏钱——想看节目效果就往上调。"
             "写错了会直接报错，不会静默退回默认档"
         ),
     )
@@ -301,24 +302,26 @@ RISK_PROFILES: Dict[str, Dict[str, Any]] = {
     },
     "aggressive": {
         "label": "激进",
-        "position_multiplier": 1.25,
-        "cash_multiplier": 0.75,
-        "trades_multiplier": 1.3,
+        "position_multiplier": 1.5,
+        "cash_multiplier": 0.5,
+        "trades_multiplier": 1.6,
         "slippage_delta": 0.001,
         "style": (
             "这一轮按激进档来：额度放宽了，能动的笔数也更多，允许比平时更集中；"
             "看到机会不用等它完美，但每笔都要说得出「为什么是现在」，说不出来就别动。"
+            "记住换手是有成本的，敢动手就得认这笔账。"
         ),
     },
     "yolo": {
         "label": "梭哈",
-        "position_multiplier": 1.6,
-        "cash_multiplier": 0.4,
-        "trades_multiplier": 1.8,
+        "position_multiplier": 2.0,
+        "cash_multiplier": 0.15,
+        "trades_multiplier": 2.0,
         "slippage_delta": 0.002,
         "style": (
-            "这一轮按梭哈档来：额度几乎拉满，允许重仓、允许看错，亏的也是模拟盘，图的就是这个；"
-            "想干就干，但别为了凑热闹硬编理由，也别把话说满——亏了要认。"
+            "这一轮按梭哈档来：额度几乎拉满、能下的笔数也拉满，允许重仓、允许看错，亏的也是模拟盘，"
+            "图的就是这个。看到像样的机会就上，别为了凑热闹硬编理由，也别把话说满——亏了要认，"
+            "而且要认得干脆。"
         ),
     },
 }
