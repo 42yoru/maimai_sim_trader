@@ -992,10 +992,11 @@ class LifecycleContractTests(unittest.IsolatedAsyncioTestCase):
     """热更新订阅：不声明的话 bot 分支是死代码。"""
 
     def test_declares_bot_config_subscription(self) -> None:
-        subscriptions = PLUGIN_MODULE.SimTraderPlugin.config_reload_subscriptions
+        """只订阅 bot："self" 不是合法范围，写进来会让插件加载失败。"""
 
-        self.assertIn("bot", subscriptions)
-        self.assertIn("self", subscriptions)
+        plugin = PLUGIN_MODULE.SimTraderPlugin()
+
+        self.assertEqual(plugin.get_config_reload_subscriptions(), ["bot"])
 
 
 class GuardrailTests(unittest.IsolatedAsyncioTestCase):

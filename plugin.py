@@ -18,7 +18,6 @@ import time
 import httpx
 
 from maibot_sdk import (
-    CONFIG_RELOAD_SCOPE_SELF,
     ON_BOT_CONFIG_RELOAD,
     Command,
     Field,
@@ -80,7 +79,7 @@ class PluginSectionConfig(PluginConfigBase):
     __ui_order__ = 0
 
     enabled: bool = Field(default=True, description="是否启用插件")
-    config_version: str = Field(default="0.8.5", description="配置版本")
+    config_version: str = Field(default="0.8.6", description="配置版本")
 
 
 class MxSectionConfig(PluginConfigBase):
@@ -409,8 +408,10 @@ class SimTraderPlugin(MaiBotPlugin):
     """模拟盘插件。"""
 
     config_model = SimTraderConfig
-    # 不声明订阅范围的话宿主根本不会为 "bot"/"model" 触发回调，on_config_update 里那个分支就是死代码
-    config_reload_subscriptions = (CONFIG_RELOAD_SCOPE_SELF, ON_BOT_CONFIG_RELOAD)
+    # 只订阅全局的 bot 配置：不声明的话宿主不会为 "bot" 触发回调，on_config_update 里那个分支就是死代码。
+    # 注意：不能把 "self" 写进来——插件自己的配置热更新是宿主无条件推送的，
+    # 声明它会被 normalize_config_reload_subscription 判为非法范围，直接导致插件加载失败。
+    config_reload_subscriptions = (ON_BOT_CONFIG_RELOAD,)
 
     @classmethod
     def build_config_schema(cls, **plugin_info: str) -> Dict[str, Any]:
