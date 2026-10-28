@@ -148,7 +148,7 @@ python scripts/preflight.py
 | `[account]` | `slippage` / `max_position_ratio` / `min_cash_reserve_ratio` / `max_trades_per_day` | 让价、单票上限、现金底线、当日笔数上限 |
 | `[risk]` | `profile` | 决策大胆程度：`steady` 稳健 / `aggressive` 激进 / `yolo` 梭哈，见下 |
 | `[schedule]` | `sessions` / `min_interval_minutes` / `max_interval_minutes` / `manual_cooldown_seconds` | 交易时段、她自选间隔的合法范围、手动看盘的冷却 |
-| `[model]` | `decision_task_name` / `report_task_name` / `max_tokens` | 默认决策用 `planner`、播报用 `replyer`；`max_tokens` 默认 4000，思考型模型给小了会只有思考没有正文 |
+| `[model]` | `decision_task_name` / `report_task_name` / `max_tokens` | 默认决策用 `planner`、播报用 `replyer`；`max_tokens` 默认 0（跟随宿主任务配置，不再覆盖），想自己限长再填正数 |
 | `[notify]` | `group_ids` / `private_user_ids` / `private_enabled` | 默认全空：不填就不播报；私聊功能已实现但默认关 |
 | `[owner]` | `owners` | 能改股票池、调节奏的人，格式 `qq:123456789`；留空时只有查询类命令可用 |
 
@@ -177,7 +177,7 @@ python scripts/preflight.py
 
 额度算好了给它，它只需要决定用不用，不用自己估。
 
-> 提醒一句：**更激进 ≠ 更赚钱**。从 0.8.2 起手续费（含 5 元最低佣金）是全额模拟的，档位越高、
+> 提醒一句：**更激进 ≠ 更赚钱**。从 0.8.3 起手续费（含 5 元最低佣金）是全额模拟的，档位越高、
 > 换手越勤，成本就越是实打实地扣在账户上——所以**想要节目效果就往上调档**：梭哈档允许单票 40%、
 > 现金只留 3%、一天最多 12 笔，这三样凑在一起，亏起来比赚起来有效率得多 (｡•̀ᴗ-)✧
 
@@ -312,7 +312,8 @@ trades_multiplier = 0.5     # 每日笔数砍一半
 妙想的 Key 有调用额度（目前是限时免费体验，规则以官方页面为准）。插件每轮固定 3 次调用（余额、持仓、委托），按默认 30 分钟一轮、一天两个交易时段算，大约 8 轮、24 次；嫌费额度就把 `[schedule] default_interval_minutes` 和 `max_interval_minutes` 调大，它可以 240 分钟才看一次，一天就只剩 1 轮。
 
 **试跑报「模型只输出了思考过程没有正文」**
-决策模型的 `max_tokens` 太小，思考阶段就把额度用光了。把 `[model] max_tokens` 调大（默认 4000）。
+决策模型的 `max_tokens` 太小，思考阶段就把额度用光了。`[model] max_tokens` 默认 0 表示
+跟随宿主任务配置；如果你自己填过正数而报这个错，把它调大或改回 0。
 
 **群里收不到播报**
 依次检查：`[notify] group_enabled` 是否为 true、`group_ids` 里的群号是否正确、`account_id` 留空是否匹配到了多个账号。日志里会有 `找不到群 xxx 的聊天流` 或 `命中 N 条聊天流` 的提示。

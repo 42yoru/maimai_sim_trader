@@ -939,6 +939,16 @@ class ComponentTimeoutTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(entries[name]["metadata"].get("timeout_ms"), 240000)
 
 
+class LifecycleContractTests(unittest.IsolatedAsyncioTestCase):
+    """热更新订阅：不声明的话 bot 分支是死代码。"""
+
+    def test_declares_bot_config_subscription(self) -> None:
+        subscriptions = PLUGIN_MODULE.SimTraderPlugin.config_reload_subscriptions
+
+        self.assertIn("bot", subscriptions)
+        self.assertIn("self", subscriptions)
+
+
 class GuardrailTests(unittest.IsolatedAsyncioTestCase):
     """本轮新增的风控与解析护栏。"""
 

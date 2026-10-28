@@ -16,7 +16,15 @@ import time
 
 import httpx
 
-from maibot_sdk import Command, Field, MaiBotPlugin, PluginConfigBase, Tool
+from maibot_sdk import (
+    CONFIG_RELOAD_SCOPE_SELF,
+    ON_BOT_CONFIG_RELOAD,
+    Command,
+    Field,
+    MaiBotPlugin,
+    PluginConfigBase,
+    Tool,
+)
 from maibot_sdk.types import ToolParameterInfo, ToolParamType
 
 from .config_ui import build_config_ui_schema
@@ -71,7 +79,7 @@ class PluginSectionConfig(PluginConfigBase):
     __ui_order__ = 0
 
     enabled: bool = Field(default=True, description="是否启用插件")
-    config_version: str = Field(default="0.8.2", description="配置版本")
+    config_version: str = Field(default="0.8.3", description="配置版本")
 
 
 class MxSectionConfig(PluginConfigBase):
@@ -393,6 +401,8 @@ class SimTraderPlugin(MaiBotPlugin):
     """模拟盘插件。"""
 
     config_model = SimTraderConfig
+    # 不声明订阅范围的话宿主根本不会为 "bot"/"model" 触发回调，on_config_update 里那个分支就是死代码
+    config_reload_subscriptions = (CONFIG_RELOAD_SCOPE_SELF, ON_BOT_CONFIG_RELOAD)
 
     @classmethod
     def build_config_schema(cls, **plugin_info: str) -> Dict[str, Any]:
