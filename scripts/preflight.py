@@ -36,6 +36,15 @@ from watchlist import WatchlistStore  # noqa: E402
 RESULTS: List[Tuple[str, bool, str]] = []
 
 
+def _money(value: Any) -> str:
+    """把妙想返回的金额字段转成可读文本；缺失或不是数字时不崩，只如实显示。"""
+
+    try:
+        return f"{float(value):,.2f}"
+    except (TypeError, ValueError):
+        return f"{value!r}"
+
+
 def record(name: str, ok: bool, detail: str) -> None:
     """记一条检查结果。"""
 
@@ -97,7 +106,11 @@ async def main() -> None:
             record(
                 "妙想账户",
                 True,
-                f"「{balance.get('accName')}」总资产 {balance.get('totalAssets'):,.2f} 可用 {balance.get('availBalance'):,.2f}",
+                "「{}」总资产 {} 可用 {}".format(
+                    balance.get("accName") or "(未命名)",
+                    _money(balance.get("totalAssets")),
+                    _money(balance.get("availBalance")),
+                ),
             )
         except MxApiError as exc:
             record("妙想账户", False, f"{exc}（code={exc.code}）")

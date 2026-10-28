@@ -939,6 +939,35 @@ class ComponentTimeoutTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(entries[name]["metadata"].get("timeout_ms"), 240000)
 
 
+class ManualGateAndReportTests(unittest.IsolatedAsyncioTestCase):
+    """手动看盘的冷却与收盘复盘的触发条件。"""
+
+    async def test_manual_cooldown_is_global(self) -> None:
+        """冷却对全局生效：换个群触发也不能绕过去连着下真实单。"""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            plugin = build_plugin(Path(tmp), overrides={"schedule": {"manual_cooldown_seconds": 600}})
+
+            plugin._mark_manual_run("stream-a")
+
+            self.assertGreater(plugin._manual_cooldown_left("stream-b"), 0)
+
+    async def test_no_close_report_when_nothing_happened(self) -> None:
+        """今天一轮都没看过盘（多半非交易日）就不发「看了 0 轮」的复盘。"""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            plugin = build_plugin(Path(tmp))
+            harness = FakeHarness()
+            plugin.ctx._rpc_call = harness.rpc
+            state = plugin._require_state().load()
+            state.check_count = 0
+            state.reported_dates = []
+
+            await plugin._maybe_send_close_report(datetime(2026, 10, 19, 15, 10), "2026-10-19")
+
+            self.assertEqual(harness.sent, [])
+
+
 class TimezoneContractTests(unittest.IsolatedAsyncioTestCase):
     """交易时段与跨日必须能锁定时区（容器里默认 UTC 会整天不开盘）。"""
 

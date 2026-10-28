@@ -80,7 +80,7 @@ class PluginSectionConfig(PluginConfigBase):
     __ui_order__ = 0
 
     enabled: bool = Field(default=True, description="是否启用插件")
-    config_version: str = Field(default="0.8.4", description="配置版本")
+    config_version: str = Field(default="0.8.5", description="配置版本")
 
 
 class MxSectionConfig(PluginConfigBase):
@@ -432,7 +432,8 @@ class SimTraderPlugin(MaiBotPlugin):
         # 一轮看盘的互斥锁：布尔标志在「读-置」之间有 await 窗口，两轮会同时跑起来
         self._round_lock = asyncio.Lock()
         # 手动触发的手动看盘冷却：{聊天流: 上次触发时间}
-        self._manual_runs: Dict[str, float] = {}
+        # 手动看盘的冷却按「全局」记：按聊天流记的话，多个群各自触发就等于连着下了好几轮真实单
+        self._manual_runs: Dict[str, float] = {"*": 0.0}
 
     # ──── 生命周期 ────
 
@@ -650,18 +651,24 @@ class SimTraderPlugin(MaiBotPlugin):
     # ──── 手动看盘的闸门 ────
 
     def _manual_cooldown_left(self, stream_key: str) -> float:
-        """同一聊天流还要等多少秒才能再手动看盘；0 表示可以立刻跑。"""
+        """还要等多少秒才能再手动看盘；0 表示可以立刻跑。
 
+        `stream_key` 保留在签名里只为兼容既有调用点：冷却对**全局**生效——
+        按聊天流记的话，多个群各自触发就等于绕过冷却连着下好几轮真实单。
+        """
+
+        del stream_key
         cooldown = self.config.schedule.manual_cooldown_seconds
         if cooldown <= 0:
             return 0.0
-        last = self._manual_runs.get(stream_key, 0.0)
+        last = self._manual_runs.get("*", 0.0)
         return max(0.0, cooldown - (time.time() - last))
 
     def _mark_manual_run(self, stream_key: str) -> None:
-        """记下这次手动看盘的时刻，供冷却判断使用。"""
+        """记下这次手动看盘的时刻（全局，不分聊天流）。"""
 
-        self._manual_runs[stream_key] = time.time()
+        del stream_key
+        self._manual_runs["*"] = time.time()
 
     def _in_trading_session(self, now: datetime) -> bool:
         """当前是否落在配置的交易时段内。"""
@@ -1092,7 +1099,13 @@ class SimTraderPlugin(MaiBotPlugin):
                     continue
             else:
                 available_qty = holding.available if holding else 0
-                quantity = int(action.quantity // LOT_SIZE) * LOT_SIZE
+                # A 股卖出允许「不足一手一次性清掉」，所以请求量覆盖全部可卖时按原样卖，
+                # 不再向下取整到 100 的倍数——否则配股/送股留下的零股永远卖不掉
+                requested_sell = int(action.quantity)
+                if available_qty and requested_sell >= available_qty:
+                    quantity = available_qty
+                else:
+                    quantity = int(requested_sell // LOT_SIZE) * LOT_SIZE
                 verdict = check_sell(
                     quantity=quantity,
                     available_quantity=available_qty,
@@ -1295,6 +1308,10 @@ class SimTraderPlugin(MaiBotPlugin):
             return
         state = self._require_state().load()
         if today in state.reported_dates:
+            return
+        if state.check_count == 0:
+            # 今天一轮都没看过盘，多半是非交易日/整天没进过交易时段，
+            # 这时候发一条「今天看了 0 轮、动了 0 笔」纯属噪音
             return
         try:
             mx = self._require_mx()

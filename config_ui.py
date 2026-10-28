@@ -210,7 +210,7 @@ _HINTS: Dict[str, str] = {
     "model.max_tokens": "决策输出上限；推理模型思考也占额度，给小了会「只有思考没有正文」。",
     "model.report_max_tokens": "播报输出的上限，一般不用动。",
     "model.request_timeout_ms": "单次模型调用允许等多久；思考型模型经常需要更长。",
-    "plugin_info.config_version": "由插件自己维护，不要手改。",
+    "plugin.config_version": "由插件自己维护，不要手改。",
 }
 
 # 只读字段：配置版本由插件管理，改错了会让宿主误判需要迁移
