@@ -1,5 +1,13 @@
 # 更新记录
 
+## 0.7.6
+
+**变更**
+
+- manifest：`plugin_type` 由 `integration` 改为 `automation`（`integration` 不在 WebUI 的类型词表里）；
+  补上缺失的 `changelog` 字段。`sdk` 区间保持 `2.12.0–2.99.99` 不变，2.12.0 上已核对
+  `call_capability(timeout_ms=)`、`Command`/`Tool` 组件元数据与各能力签名
+
 ## 0.7.5
 
 **修复**
