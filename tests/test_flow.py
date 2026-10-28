@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import importlib.util
+import httpx
 import json
 import os
 import sys
@@ -1005,6 +1006,68 @@ class GuardrailTests(unittest.IsolatedAsyncioTestCase):
             placed_codes = [item["code"] for item in plugin._mx.placed]
             self.assertNotIn("601899", placed_codes)
             self.assertTrue(any("没成交的买单" in line for line in notes), notes)
+
+    async def test_capability_error_is_not_treated_as_no_stream(self) -> None:
+        """聊天流能力报错时必须抛，不能当成「这个群没有聊天流」静默跳过播报。"""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            plugin = build_plugin(Path(tmp))
+            harness = FakeHarness()
+
+            async def rpc(method: str, plugin_id: str, payload: Dict[str, Any], timeout_ms: Optional[int] = None) -> Any:
+                if payload["capability"].startswith("chat."):
+                    return {"success": False, "error": "能力未授权"}
+                return await harness.rpc(method, plugin_id, payload, timeout_ms=timeout_ms)
+
+            plugin.ctx._rpc_call = rpc
+
+            with self.assertRaises(TypeError):
+                await plugin._resolve_group_stream(GROUP_ID)
+
+    async def test_network_error_on_one_order_does_not_abort_round(self) -> None:
+        """单笔下单网络异常不该炸穿整轮：后面的动作继续，已成交笔数不丢。"""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            plugin = build_plugin(Path(tmp))
+            harness = FakeHarness()
+            plugin.ctx._rpc_call = harness.rpc
+
+            original = plugin._mx.place_order
+
+            async def flaky(*, direction: str, stock_code: str, price: float, quantity: int) -> Dict[str, Any]:
+                if stock_code == "601899":
+                    raise httpx.HTTPError("connection reset by peer")
+                return await original(direction=direction, stock_code=stock_code, price=price, quantity=quantity)
+
+            plugin._mx.place_order = flaky  # type: ignore[method-assign]
+            try:
+                notes = await plugin._run_round(datetime(2026, 10, 19, 10, 0), "2026-10-19", announce=False)
+            finally:
+                plugin._mx.place_order = original  # type: ignore[method-assign]
+
+            placed_codes = [item["code"] for item in plugin._mx.placed]
+            self.assertNotIn("601899", placed_codes)
+            self.assertIn("600309", placed_codes, "一笔失败后另一笔应该照样成交")
+            self.assertTrue(any("下单失败" in line for line in notes), notes)
+
+    async def test_failed_broadcast_is_reported(self) -> None:
+        """播报发送失败要留痕，不能静默丢。"""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            plugin = build_plugin(Path(tmp))
+            harness = FakeHarness()
+
+            async def rpc(method: str, plugin_id: str, payload: Dict[str, Any], timeout_ms: Optional[int] = None) -> Any:
+                if payload["capability"] == "send.text":
+                    return {"success": True, "sent": False}
+                return await harness.rpc(method, plugin_id, payload, timeout_ms=timeout_ms)
+
+            plugin.ctx._rpc_call = rpc
+
+            with self.assertLogs("plugin.SimTraderPlugin", level="ERROR") as captured:
+                await plugin._send_to_targets("今天的播报")
+
+            self.assertTrue(any("播报发送失败" in line for line in captured.output), captured.output)
 
     async def test_decision_parse_failure_retries_once(self) -> None:
         """解析失败要落原始输出并重试一次，不能整轮直接丢。"""

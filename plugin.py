@@ -14,6 +14,8 @@ import asyncio
 import os
 import time
 
+import httpx
+
 from maibot_sdk import Command, Field, MaiBotPlugin, PluginConfigBase, Tool
 from maibot_sdk.types import ToolParameterInfo, ToolParamType
 
@@ -69,7 +71,7 @@ class PluginSectionConfig(PluginConfigBase):
     __ui_order__ = 0
 
     enabled: bool = Field(default=True, description="是否启用插件")
-    config_version: str = Field(default="0.8.1", description="配置版本")
+    config_version: str = Field(default="0.8.2", description="配置版本")
 
 
 class MxSectionConfig(PluginConfigBase):
@@ -1076,9 +1078,13 @@ class SimTraderPlugin(MaiBotPlugin):
                     price=price,
                     quantity=quantity,
                 )
-            except (MxApiError, ValueError) as exc:
+            except (MxApiError, ValueError, httpx.HTTPError) as exc:
+                # 网络类异常（httpx.HTTPError）以前不在捕获范围里，一笔超时就会炸穿整轮，
+                # 已成交的笔数还没落盘就一起丢了。单笔失败只记下来，后面的动作继续走。
                 notes.append(f"{action.name}({action.code}) 下单失败：{exc}")
-                self.ctx.logger.warning("下单失败 %s %s: %s", action.action, action.code, exc)
+                self.ctx.logger.error(
+                    "下单失败 %s %s %d股 @%.2f: %s", action.action, action.code, quantity, price, exc, exc_info=True
+                )
                 continue
             if order_result:
                 self.ctx.logger.info("妙想下单返回 %s: %s", action.code, order_result)
@@ -1186,14 +1192,16 @@ class SimTraderPlugin(MaiBotPlugin):
                 if not stream_id:
                     self.ctx.logger.warning("找不到群 %s 的聊天流，跳过播报", group_id)
                     continue
-                await self.ctx.send.text(text, stream_id)
+                if not _send_ok(await self.ctx.send.text(text, stream_id, return_details=True)):
+                    self.ctx.logger.error("播报发送失败: group=%s stream=%s", group_id, stream_id)
         if self.config.notify.private_enabled:
             for user_id in self.config.notify.private_user_ids:
                 stream_id = await self._resolve_private_stream(user_id)
                 if not stream_id:
                     self.ctx.logger.warning("找不到用户 %s 的私聊流，跳过播报", user_id)
                     continue
-                await self.ctx.send.text(text, stream_id)
+                if not _send_ok(await self.ctx.send.text(text, stream_id, return_details=True)):
+                    self.ctx.logger.error("播报发送失败: user=%s stream=%s", user_id, stream_id)
 
     async def _resolve_group_stream(self, group_id: str) -> Optional[str]:
         """群号 → 真实 session_id。"""
@@ -1203,7 +1211,7 @@ class SimTraderPlugin(MaiBotPlugin):
         streams = await self.ctx.chat.get_group_streams(self.config.notify.platform)
         matches = [
             row
-            for row in _as_rows(streams)
+            for row in _as_rows(streams, capability="chat.get_group_streams")
             if str(row.get("group_id") or "") == group_id
             and (not self.config.notify.account_id or str(row.get("account_id") or "") == self.config.notify.account_id)
         ]
@@ -1223,7 +1231,7 @@ class SimTraderPlugin(MaiBotPlugin):
         streams = await self.ctx.chat.get_private_streams(self.config.notify.platform)
         matches = [
             row
-            for row in _as_rows(streams)
+            for row in _as_rows(streams, capability="chat.get_private_streams")
             if str(row.get("user_id") or "") == user_id
             and (not self.config.notify.account_id or str(row.get("account_id") or "") == self.config.notify.account_id)
         ]
@@ -1634,17 +1642,30 @@ class SimTraderPlugin(MaiBotPlugin):
 # ──── 小工具 ────
 
 
-def _as_rows(value: Any) -> List[Dict[str, Any]]:
-    """把能力返回的聊天流结果规整成列表。"""
+def _send_ok(result: Any) -> bool:
+    """判断 send.text 是否真的发出去了。
+
+    必须配合 ``return_details=True`` 调用：默认形态下 SDK 会把结果塌成
+    ``bool(result["success"])``，**真实的 ``sent`` 字段被丢掉了**，于是"发失败"和"发成功"
+    在插件侧看起来一模一样。带上 return_details 才会拿到 ``{"sent": ..., "message_id": ...}``。
+    """
+
+    if isinstance(result, dict):
+        return bool(result.get("sent"))
+    return bool(result)
+
+
+def _as_rows(value: Any, *, capability: str) -> List[Dict[str, Any]]:
+    """把能力返回的聊天流结果规整成列表。
+
+    形状不对一律抛错：宿主的 `chat.*` 能力出错时返回 `{"success": False, "error": ...}`，
+    以前这里一律 `return []`，于是「读不到聊天流」和「这个群/用户没有聊天流」混成同一个现象，
+    播报直接静默跳过。
+    """
 
     if isinstance(value, list):
         return [row for row in value if isinstance(row, dict)]
-    if isinstance(value, dict):
-        for key in ("streams", "data", "items"):
-            rows = value.get(key)
-            if isinstance(rows, list):
-                return [row for row in rows if isinstance(row, dict)]
-    return []
+    raise TypeError(f"{capability} 返回形状异常，无法确定聊天流: {type(value).__name__} / {value!r}")
 
 
 def _to_float(value: Any) -> float:
