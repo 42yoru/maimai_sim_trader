@@ -1,5 +1,23 @@
 # 更新记录
 
+## 0.8.8
+
+**修复**
+
+- **WebUI 保存配置报 `Unable to convert an object of <class 'NoneType'> to a TOML item`**：
+  0.8.0 给 `[risk]` 加那四个倍率时用了 `Optional[float] = None` 当"沿用档位预设"的哨兵，
+  而 TOML 没有 null —— 宿主保存配置走 tomlkit，遇到 None 直接抛 `ConvertError`，
+  整张配置页都存不进去。
+  改成显式的 `profile = "custom"` 档：四项都是普通 float（默认 1.0/1.0/1.0/0.0），
+  只有 `profile` 为 `custom` 时才生效，其它档位忽略它们
+
+**细节**
+
+- 之前"填了某一项就覆盖"的写法没有了：要自定义就整档改成 `custom`，四项一起给——语义更清楚，
+  也避免"改了某一项发现没反应"（非 custom 档本来就不会读它）
+- 测试 136 → 138：新增「默认配置必须可被 tomlkit 序列化、且不含 None」这条守卫，
+  以及「非 custom 档忽略那四个数字」
+
 ## 0.8.7
 
 **细节**

@@ -30,6 +30,7 @@ min_commission = 5.0
 [risk]
 # 决策的大胆程度，三档：
 #   steady     = 稳健（默认，和上面的数字一致）
+#   custom     = 自定义（用下面四项倍数，自己拿捏）
 #   aggressive = 激进（单票 1.5 倍、现金底线 0.5 倍、每日笔数 1.6 倍、让价 +0.1%）
 #   yolo       = 梭哈（单票 2.0 倍、现金 0.15 倍、笔数 2.0 倍、让价 +0.2%）
 # 档位越高，换手越勤、仓位越重；手续费是全额模拟的，所以也就越容易亏钱。
@@ -38,11 +39,11 @@ min_commission = 5.0
 # 决策 prompt 里会同时给出这一轮实际剩余的额度（单票余量、仓位余量、还能下几笔）。
 # 写错了会直接报错，不会静默退回默认档。
 profile = "steady"
-# 下面四项留空（注释掉）表示沿用档位预设；填了就覆盖，用来单独微调某一项
-# position_multiplier = 1.0   # 单票仓位倍数；1.0 = 完全按 [account] 的原始数字，不被放大
-# cash_multiplier = 1.0       # 现金底线倍数；越大越保守
-# trades_multiplier = 1.0     # 每日笔数倍数；想少动手就填小
-# slippage_delta = 0.0        # 在 [account] slippage 之上再加的让价
+# 想自己调倍数就把上面改成 profile = "custom"，然后再改这四项（非 custom 档会忽略它们）
+position_multiplier = 1.0   # 单票仓位倍数；1.0 = 完全按 [account] 的原始数字，不被放大
+cash_multiplier = 1.0       # 现金底线倍数；越大越保守，0 = 不留现金底线
+trades_multiplier = 1.0     # 每日笔数倍数；想少动手就填小
+slippage_delta = 0.0        # 在 [account] slippage 之上再加的让价
 
 [schedule]
 enabled = true

@@ -79,7 +79,7 @@ class PluginSectionConfig(PluginConfigBase):
     __ui_order__ = 0
 
     enabled: bool = Field(default=True, description="是否启用插件")
-    config_version: str = Field(default="0.8.7", description="配置版本")
+    config_version: str = Field(default="0.8.8", description="配置版本")
 
 
 class MxSectionConfig(PluginConfigBase):
@@ -255,35 +255,37 @@ class RiskSectionConfig(PluginConfigBase):
     profile: str = Field(
         default="steady",
         description=(
-            "决策大胆程度：steady 稳健 / aggressive 激进 / yolo 梭哈。"
+            "决策大胆程度：steady 稳健 / aggressive 激进 / yolo 梭哈 / custom 自定义。"
             "档位以 [account] 里的数字为基准按倍数调整，再夹到代码里的绝对上限；"
             "档位越高换手越勤、仓位越重，在手续费全额模拟之后也越容易亏钱——想看节目效果就往上调。"
-            "写错了会直接报错，不会静默退回默认档"
+            "想自己调倍数就填 custom，然后改下面四项。写错了会直接报错，不会静默退回默认档"
         ),
     )
-    position_multiplier: Optional[float] = Field(
-        default=None,
+    # 这四项只在 profile="custom" 时生效。故意不用 None 当"沿用预设"的哨兵：
+    # TOML 没有 null，宿主保存配置时 tomlkit 遇到 None 会直接抛 ConvertError，WebUI 就存不进去。
+    position_multiplier: float = Field(
+        default=1.0,
         ge=0.1,
         le=5.0,
-        description="覆盖档位的单票仓位倍数（留空用档位预设）；1.0 表示完全按 [account] 的原始数字",
+        description="仅 profile=custom 时生效：单票仓位倍数；1.0 表示完全按 [account] 的原始数字",
     )
-    cash_multiplier: Optional[float] = Field(
-        default=None,
+    cash_multiplier: float = Field(
+        default=1.0,
         ge=0.0,
         le=5.0,
-        description="覆盖档位的现金底线倍数（留空用档位预设）；越大越保守",
+        description="仅 profile=custom 时生效：现金底线倍数；越大越保守，0 表示不留现金底线",
     )
-    trades_multiplier: Optional[float] = Field(
-        default=None,
+    trades_multiplier: float = Field(
+        default=1.0,
         ge=0.1,
         le=5.0,
-        description="覆盖档位的每日笔数倍数（留空用档位预设）",
+        description="仅 profile=custom 时生效：每日笔数倍数；想少动手就填小一点",
     )
-    slippage_delta: Optional[float] = Field(
-        default=None,
+    slippage_delta: float = Field(
+        default=0.0,
         ge=0.0,
         le=0.02,
-        description="覆盖档位的额外让价（留空用档位预设）；越大会更保守但也更不容易成交",
+        description="仅 profile=custom 时生效：在 [account] slippage 之上再加的让价",
     )
 
 
@@ -327,6 +329,17 @@ RISK_PROFILES: Dict[str, Dict[str, Any]] = {
             "这一轮按激进档来：额度放宽了，能动的笔数也更多，允许比平时更集中；"
             "看到机会不用等它完美，但每笔都要说得出「为什么是现在」，说不出来就别动。"
             "记住换手是有成本的，敢动手就得认这笔账。"
+        ),
+    },
+    "custom": {
+        "label": "自定义",
+        "position_multiplier": 1.0,
+        "cash_multiplier": 1.0,
+        "trades_multiplier": 1.0,
+        "slippage_delta": 0.0,
+        "style": (
+            "这一轮按自定义档来：额度按 [risk] 里填的倍数算，轻重由主人定，你只管按这个额度做事；"
+            "动手前先想清楚这一笔的成本，说不清就别动。"
         ),
     },
     "yolo": {
@@ -612,13 +625,18 @@ class SimTraderPlugin(MaiBotPlugin):
             raise RuntimeError(
                 f"[risk] profile 只支持 {' / '.join(RISK_PROFILES)}，当前为 {self.config.risk.profile!r}"
             )
-        # 档位只是预设，[risk] 里逐项填了就以填的为准（None 表示沿用预设）
-        profile = dict(RISK_PROFILES[name])
-        for key in ("position_multiplier", "cash_multiplier", "trades_multiplier", "slippage_delta"):
-            override = getattr(self.config.risk, key)
-            if override is not None:
-                profile[key] = float(override)
-        return profile
+        if name == "custom":
+            # 自定义档直接吃 [risk] 里那四个数字；它们本身就是 float，
+            # 不用 None 做哨兵（宿主保存配置时 TOML 无法表示 None）
+            return {
+                "label": RISK_PROFILES["custom"]["label"],
+                "position_multiplier": float(self.config.risk.position_multiplier),
+                "cash_multiplier": float(self.config.risk.cash_multiplier),
+                "trades_multiplier": float(self.config.risk.trades_multiplier),
+                "slippage_delta": float(self.config.risk.slippage_delta),
+                "style": RISK_PROFILES["custom"]["style"],
+            }
+        return dict(RISK_PROFILES[name])
 
     def _effective_limits(self) -> Dict[str, float]:
         """把档位倍数作用到用户配置的数字上，并夹到代码里的绝对上限。"""

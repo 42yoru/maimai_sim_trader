@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional
 import importlib.util
 import httpx
 import json
+import tomlkit
 import os
 import sys
 import tempfile
@@ -1162,17 +1163,51 @@ class GuardrailTests(unittest.IsolatedAsyncioTestCase):
 class RiskAndPromptConfigTests(unittest.IsolatedAsyncioTestCase):
     """档位倍率与提示词都应该是用户可改的。"""
 
-    async def test_risk_multipliers_can_be_overridden(self) -> None:
+    async def test_custom_profile_uses_configured_multipliers(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             plugin = build_plugin(
                 Path(tmp),
-                overrides={"risk": {"profile": "yolo", "cash_multiplier": 1.0, "trades_multiplier": 1.0}},
+                overrides={
+                    "risk": {
+                        "profile": "custom",
+                        "position_multiplier": 1.0,
+                        "cash_multiplier": 1.5,
+                        "trades_multiplier": 0.5,
+                        "slippage_delta": 0.0,
+                    }
+                },
             )
             limits = plugin._effective_limits()
 
-            # yolo 预设会把现金底线压到 20%×0.4=8%；覆盖成 1.0 之后应回到 20%
-            self.assertAlmostEqual(limits["min_cash_reserve_ratio"], 0.2)
-            self.assertEqual(limits["max_trades_per_day"], 6.0)
+            # 默认 [account] 是 单票 20% / 现金 20% / 6 笔
+            self.assertAlmostEqual(limits["max_position_ratio"], 0.2)
+            self.assertAlmostEqual(limits["min_cash_reserve_ratio"], 0.3)
+            self.assertEqual(limits["max_trades_per_day"], 3.0)
+
+    async def test_preset_profile_ignores_custom_numbers(self) -> None:
+        """非 custom 档忽略那四个数字，避免"改了没反应"的困惑。"""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            plugin = build_plugin(
+                Path(tmp), overrides={"risk": {"profile": "steady", "cash_multiplier": 0.1}}
+            )
+
+            self.assertAlmostEqual(plugin._effective_limits()["min_cash_reserve_ratio"], 0.2)
+
+    def test_default_config_is_toml_serializable(self) -> None:
+        """默认配置里不能出现 None：TOML 没有 null，宿主用 tomlkit 保存时会直接抛错。
+
+        0.8.0 里 risk 那四个倍率用了 Optional[float] = None 当"沿用预设"的哨兵，
+        结果 WebUI 一保存配置就报 `Unable to convert an object of <class 'NoneType'> to a TOML item`。
+        """
+
+        config = PLUGIN_MODULE.SimTraderPlugin.build_default_config()
+
+        nones = [f"{section}.{key}" for section, values in config.items()
+                 if isinstance(values, dict) for key, value in values.items() if value is None]
+        self.assertEqual(nones, [], f"这些字段是 None，WebUI 会存不了配置: {nones}")
+        json.dumps(config)  # 顺带确认整个配置是可序列化的结构
+        self.assertIn("[risk]", tomlkit.dumps(config))
 
     async def test_prompt_template_requires_placeholders(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

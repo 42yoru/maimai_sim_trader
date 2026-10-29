@@ -182,15 +182,15 @@ _HINTS: Dict[str, str] = {
     "account.sell_fee_rate": "卖出费用率（含印花税），默认 0.0011；小单卖出还不如拿着时会被拦下。",
     "account.min_commission": "券商单笔最低佣金，A 股普遍 5 元；填 0 表示不模拟。小单的真实成本靠它显形。",
     "risk.profile": (
-        "steady 稳健 / aggressive 激进 / yolo 梭哈。"
+        "steady 稳健 / aggressive 激进 / yolo 梭哈 / custom 自定义。"
         "档位在账户那一节的数字上乘倍数（单票 ×1/×1.5/×2.0，现金 ×1/×0.5/×0.15，"
         "笔数 ×1/×1.6/×2.0），代码里还有绝对上限，翻不过去。"
         "档位越高换手越勤、仓位越重，手续费全额模拟之后也越容易亏钱——想看节目效果就往上调。"
     ),
-    "risk.position_multiplier": "留空用档位预设；填 1.0 表示完全按 [account] 的原始数字，不被倍数放大。",
-    "risk.cash_multiplier": "留空用档位预设；数值越大越保守（现金底线越高）。",
-    "risk.trades_multiplier": "留空用档位预设；想少动手就填小一点。",
-    "risk.slippage_delta": "在 [account] slippage 之上再加的让价，留空用档位预设。",
+    "risk.position_multiplier": "只在 profile=custom 时生效：1.0 = 完全按 [account] 原值，不被放大。",
+    "risk.cash_multiplier": "只在 profile=custom 时生效：越大越保守（现金底线越高），0 = 不留底线。",
+    "risk.trades_multiplier": "只在 profile=custom 时生效：想少动手就填小一点。",
+    "risk.slippage_delta": "只在 profile=custom 时生效：在 [account] slippage 之上再加的让价。",
     "prompt.system_template": (
         "她每轮做交易判断用的 system 提示词。必须保留 {header}、{max_position_pct}、"
         "{min_cash_pct} 三个占位符，{limits_notice} 可选；缺了会在加载时报错。"
