@@ -19,7 +19,7 @@
 - 这是**虚拟账户**：钱、持仓和盈亏都是模拟数字。
 - `sim_trader_query` 与 `sim_trader_review` **没有调用者权限门槛**。任何能让模型触发工具的聊天都可以查询虚拟账户/委托/历史，也可以请求重新看盘；交易时段内 `review` 可能真实提交模拟委托。这是插件的娱乐性设计，不适用于真实账户。
 - `review` 在交易时段内会下模拟单，闭市或周末只做决策、不下单；同一聊天流的手动触发受冷却限制。把 `[mx]` 指向真实账户前，必须先自行增加权限闸门。
-- 妙想 API Key 是访问模拟组合的凭据，可以放在用户自己的 `config.toml`；不要把带 Key 的 `config.toml`、`config_back/` 或 `data/` 提交到 Git。也可使用环境变量 `MX_APIKEY`。
+- 妙想 API Key 是访问模拟组合的凭据。可配置在 `config.toml`，也可使用环境变量 `MX_APIKEY`；请按部署环境的凭据管理规范保护它。
 - 妙想 Key 必须在技能页绑定到模拟组合，否则会收到 `404 请先绑定账户~`。
 - 插件只提交限价委托，不确认逐笔成交；播报中的“买了/卖了”表示已提交委托，不等于已成交。
 
@@ -49,7 +49,7 @@ cd plugins/maimai_sim_trader
 python scripts/preflight.py
 ```
 
-自检会检查 Key、模拟组合、股票池行情和播报群；失败时返回非零退出码，不打印密钥。注意：`preflight.py` 是开发者本地辅助脚本，会只读宿主数据库；运行时插件不碰宿主数据库，而是使用 `chat.get_group_streams` 等能力。
+自检会检查 Key、模拟组合、股票池行情和播报群；失败时返回非零退出码，不在输出中显示密钥。注意：`preflight.py` 是本地辅助脚本，会只读宿主数据库；运行时插件不碰宿主数据库，而是使用 `chat.get_group_streams` 等能力。
 
 ## 最小配置
 
@@ -67,7 +67,7 @@ group_ids = ["你的群号"]
 owners = ["qq:你的QQ号"]
 ```
 
-`notify.group_ids` 为空时不播报；`owner.owners` 为空时查询类命令仍可用，但修改股票池和看盘节奏的命令无人可用。默认不会预置作者的群号或用户 ID。
+`notify.group_ids` 为空时不播报；`owner.owners` 为空时查询类命令仍可用，但修改股票池和看盘节奏的命令无人可用。默认不会预置任何群号或用户 ID。
 
 ## 常用用法
 
@@ -223,4 +223,4 @@ maimai_sim_trader/
 
 ## 贡献与许可证
 
-欢迎提 Issue 和 PR。带密钥的 `config.toml`、`config_back/` 和 `data/` 已在 `.gitignore` 中，切勿提交。代码使用 [MIT](LICENSE)；插件图标由作者使用 AI 图像模型生成，随插件一同以 MIT 发布。
+欢迎提 Issue 和 PR。代码使用 [MIT](LICENSE)；插件图标由作者使用 AI 图像模型生成，随插件一同以 MIT 发布。
