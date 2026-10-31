@@ -161,7 +161,7 @@ _TABS = {
 _HINTS: Dict[str, str] = {
     "mx.api_key": (
         "在东方财富 App 首页搜「妙想 Skills」领取，mkt_v_ 开头；"
-        "也可以改用环境变量 MX_APIKEY。别提交进仓库，插件也从不打印它。"
+        "也可以改用环境变量 MX_APIKEY。请按部署环境的凭据管理规范保护它。"
     ),
     "mx.base_url": "必须是 https://；不建议指向本机、内网或云元数据地址。",
     "mx.timeout": "单次请求妙想的超时；网络慢可以调大，不涉及行情接口。",
