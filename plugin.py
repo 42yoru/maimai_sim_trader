@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import asyncio
+import math
 import os
 import time
 
@@ -48,8 +49,16 @@ from .state import (
     RuntimeState,
     StateStore,
 )
-from .trading import BUY_FEE_RATE, LOT_SIZE, SELL_FEE_RATE, check_sell, limit_price, resolve_quantity
-from .watchlist import WatchlistStore, is_valid_code
+from .trading import (
+    BUY_FEE_RATE,
+    LOT_SIZE,
+    SELL_FEE_RATE,
+    check_sell,
+    estimated_fee,
+    limit_price,
+    resolve_quantity,
+)
+from .watchlist import PoolItem, WatchlistStore, is_valid_code
 
 LOGGER_NAME = "maimai.sim-trader"
 DECISION_PARSE_ATTEMPTS = 2
@@ -361,9 +370,9 @@ _ORDER_CLOSED_MARKERS = ("已成", "已成交", "已撤", "部撤", "废单", "f
 
 
 def _order_code(row: Dict[str, Any]) -> str:
-    """委托记录里的股票代码。"""
+    """委托记录里的股票代码，兼容妙想的字段别名。"""
 
-    return str(row.get("stockCode") or row.get("code") or "").strip()
+    return str(row.get("stockCode") or row.get("secCode") or row.get("code") or "").strip()
 
 
 def _is_open_buy_order(row: Dict[str, Any]) -> bool:
@@ -375,7 +384,7 @@ def _is_open_buy_order(row: Dict[str, Any]) -> bool:
     direction = str(row.get("direction") or row.get("orderDrt") or "").lower()
     if "买" not in direction and "buy" not in direction:
         return False
-    status = str(row.get("status") or "").lower()
+    status = str(row.get("status") or row.get("orderStatus") or "").lower()
     return not any(marker in status for marker in _ORDER_CLOSED_MARKERS)
 
 
@@ -408,10 +417,12 @@ def parse_sessions(raw: Sequence[str]) -> List[Tuple[dt_time, dt_time]]:
 
 
 def in_sessions(now: datetime, sessions: Sequence[Tuple[dt_time, dt_time]]) -> bool:
-    """当前是否落在任一交易时段内。"""
+    """当前是否落在任一工作日交易时段内，区间采用左闭右开。"""
 
+    if now.weekday() >= 5:
+        return False
     current = now.time()
-    return any(start <= current <= end for start, end in sessions)
+    return any(start <= current < end for start, end in sessions)
 
 
 # ──── 插件主体 ────
@@ -448,6 +459,7 @@ class SimTraderPlugin(MaiBotPlugin):
         # 手动触发的手动看盘冷却：{聊天流: 上次触发时间}
         # 手动看盘的冷却按「全局」记：按聊天流记的话，多个群各自触发就等于连着下了好几轮真实单
         self._manual_runs: Dict[str, float] = {"*": 0.0}
+        self._last_round_decision: Optional[Decision] = None
 
     # ──── 生命周期 ────
 
@@ -794,13 +806,13 @@ class SimTraderPlugin(MaiBotPlugin):
             balance = await mx.get_balance()
             holdings = parse_holdings(await mx.get_positions())
             orders = await mx.get_orders()
-            quotes = await self._fetch_pool_quotes()
+            quotes = await self._fetch_pool_quotes(extra_codes=tuple(holdings))
             if not quotes:
                 raise RuntimeError("股票池行情为空，无法决策")
             if not dry_run:
                 state.track_position_state(has_position=bool(holdings), today=today)
             quote_times = {quote.updated_at[:8] for quote in quotes.values() if quote.updated_at}
-            if quote_times and today.replace("-", "") not in quote_times:
+            if not quote_times or today.replace("-", "") not in quote_times:
                 self.ctx.logger.info("行情最新日期是 %s，非交易日", sorted(quote_times))
                 if not dry_run:
                     state.next_check_at = time.time() + self.config.schedule.max_interval_minutes * 60
@@ -814,6 +826,7 @@ class SimTraderPlugin(MaiBotPlugin):
                 orders=orders,
                 quotes=quotes,
             )
+            self._last_round_decision = decision
             executed, round_notes = await self._execute_decision(
                 decision=decision,
                 balance=balance,
@@ -838,7 +851,8 @@ class SimTraderPlugin(MaiBotPlugin):
             )
             state.record_round(
                 record=self._round_record(now, decision, round_notes),
-                trade_count=executed,
+                # 成功下单时已逐笔持久化 trade_count；这里避免重复累计。
+                trade_count=0,
             )
             if executed > 0:
                 # 这一轮建了仓，空仓起点要立刻清掉，别等到下一轮
@@ -856,14 +870,14 @@ class SimTraderPlugin(MaiBotPlugin):
         finally:
             self._round_lock.release()
 
-    async def _fetch_pool_quotes(self) -> Dict[str, Quote]:
-        """拉股票池的实时快照。
+    async def _fetch_pool_quotes(self, extra_codes: Sequence[str] = ()) -> Dict[str, Quote]:
+        """拉股票池和现有持仓的实时快照。
 
-        池子可能是手改过的，遇到非六位代码就跳过并告警：
-        让一个坏代码把整轮行情拉挂掉，比少看一只票糟糕得多。
+        持仓即使被从股票池移除，也必须继续有报价，避免仓位无法卖出。
+        池子可能是手改过的，遇到非六位代码就跳过并告警。
         """
 
-        codes = self._require_watchlist().codes()
+        codes = list(dict.fromkeys([*self._require_watchlist().codes(), *extra_codes]))
         valid = [code for code in codes if is_valid_code(code)]
         dropped = [code for code in codes if not is_valid_code(code)]
         if dropped:
@@ -938,8 +952,14 @@ class SimTraderPlugin(MaiBotPlugin):
         store = self._require_state()
         state = store.load()
         pool_items = self._require_watchlist().all()
+        pool_by_code = {item.code: item for item in pool_items}
+        for holding in positions:
+            pool_by_code.setdefault(
+                holding.code,
+                PoolItem(code=holding.code, name=holding.name, added_at=0.0),
+            )
         pool_lines: List[str] = []
-        for item in pool_items:
+        for item in pool_by_code.values():
             quote = quotes.get(item.code)
             pool_lines.append(quote.to_brief() if quote else f"{item.code} {item.name}（暂无行情）")
         pending = [
@@ -1041,8 +1061,8 @@ class SimTraderPlugin(MaiBotPlugin):
         today: str,
         state: RuntimeState,
         dry_run: bool = False,
-    ) -> Tuple[int, List[str], List[str]]:
-        """按决策下单；返回成交尝试数、文字记录、账户摘要。"""
+    ) -> Tuple[int, List[str]]:
+        """按决策下单；返回成交尝试数与文字记录。"""
 
         mx = self._require_mx()
         watchlist = self._require_watchlist()
@@ -1073,7 +1093,8 @@ class SimTraderPlugin(MaiBotPlugin):
         # 轮首的 holding.market_value 不会随本轮成交更新：同一只票连买两次会各按旧市值算，
         # 单票上限就被顶穿了。这里累计本轮已经买掉的金额。
         pending_buy_value: Dict[str, float] = {}
-        # 还挂着的买单也要挡住：未成交的委托既不进持仓也不在行情里，重下一笔等于重复占用资金
+        pending_sell_quantity: Dict[str, int] = {}
+        # 还挂着的买单也要挡住：未成交委托既不进持仓也不在行情里，重下一笔等于重复占用资金
         open_buy_codes = {_order_code(row) for row in orders if _is_open_buy_order(row)} - {""}
         # 风险档在这里落到具体数字上：档位只调倍数，绝对上限仍由代码夹住
         limits = self._effective_limits()
@@ -1118,6 +1139,7 @@ class SimTraderPlugin(MaiBotPlugin):
                     continue
             else:
                 available_qty = holding.available if holding else 0
+                available_qty -= pending_sell_quantity.get(action.code, 0)
                 # A 股卖出允许「不足一手一次性清掉」，所以请求量覆盖全部可卖时按原样卖，
                 # 不再向下取整到 100 的倍数——否则配股/送股留下的零股永远卖不掉
                 requested_sell = int(action.quantity)
@@ -1141,8 +1163,14 @@ class SimTraderPlugin(MaiBotPlugin):
                 verb = "买" if action.action == "buy" else "卖"
                 notes.append(f"（试跑）会{verb} {action.name}({action.code}) {quantity}股 @{price:.2f}")
                 if action.action == "buy":
-                    available_cash -= price * quantity
+                    available_cash -= price * quantity + estimated_fee(
+                        price * quantity,
+                        fee_rate=account.buy_fee_rate,
+                        min_commission=account.min_commission,
+                    )
                     pending_buy_value[action.code] = pending_buy_value.get(action.code, 0.0) + price * quantity
+                else:
+                    pending_sell_quantity[action.code] = pending_sell_quantity.get(action.code, 0) + quantity
                 continue
 
             try:
@@ -1165,12 +1193,21 @@ class SimTraderPlugin(MaiBotPlugin):
 
             executed += 1
             traded_today += 1
+            if not dry_run:
+                state.trade_count = traded_today
+                self._require_state().save()
             verb = "买" if action.action == "buy" else "卖"
             notes.append(f"{verb}了 {action.name}({action.code}) {quantity}股 @{price:.2f}")
             self.ctx.logger.info("下单成功 %s %s %d股 @%.2f", action.action, action.code, quantity, price)
             if action.action == "buy":
-                available_cash -= price * quantity
+                available_cash -= price * quantity + estimated_fee(
+                    price * quantity,
+                    fee_rate=account.buy_fee_rate,
+                    min_commission=account.min_commission,
+                )
                 pending_buy_value[action.code] = pending_buy_value.get(action.code, 0.0) + price * quantity
+            else:
+                pending_sell_quantity[action.code] = pending_sell_quantity.get(action.code, 0) + quantity
 
         return executed, notes
 
@@ -1687,8 +1724,11 @@ class SimTraderPlugin(MaiBotPlugin):
         except Exception as exc:
             self.ctx.logger.error("聊天里触发看盘失败", exc_info=True)
             return {"success": False, "content": f"看盘失败了：{exc}"}
-        state = self._require_state().load()
-        summary = [f"心情：{state.last_mood or '平静'}", f"判断：{state.last_reasoning or '（没写）'}"]
+        decision = self._last_round_decision
+        summary = [
+            f"心情：{decision.mood if decision else '平静'}",
+            f"判断：{decision.reasoning if decision else '（没写）'}",
+        ]
         if off_session:
             summary.insert(0, "现在不在交易时段，这一轮只看不做，没有下单。")
         if notes:

@@ -236,7 +236,7 @@ def _build_field(source: str, name: str, template: Dict[str, Any], label: str, o
     if path in _DISABLED_FIELDS:
         entry["disabled"] = True
     if path == "risk.profile":
-        entry["choices"] = ["steady", "aggressive", "yolo"]
+        entry["choices"] = ["steady", "aggressive", "yolo", "custom"]
         entry["widget"] = "select"
     return entry
 

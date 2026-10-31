@@ -624,8 +624,10 @@ class ToolTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("status", result["content"])
 
     async def test_review_places_orders_without_broadcast(self) -> None:
-        """聊天里触发的看盘会真下单，但不额外往群里播报。"""
+        """工作日交易时段内聊天触发的看盘会真下单，但不额外往群里播报。"""
 
+        if datetime.now().weekday() >= 5:
+            self.skipTest("周末不允许交易")
         with tempfile.TemporaryDirectory() as tmp:
             plugin = build_plugin(Path(tmp))
             # 闭市时 review 会自动降级为试跑，这条要验"真下单"，所以把时段设成现在
@@ -763,8 +765,10 @@ class ManualTriggerGateTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(plugin._mx.placed), 0)
 
     async def test_review_inside_session_places_orders(self) -> None:
-        """交易时段内触发看盘：照常下单。"""
+        """工作日交易时段内触发看盘：照常下单。"""
 
+        if datetime.now().weekday() >= 5:
+            self.skipTest("周末不允许交易")
         with tempfile.TemporaryDirectory() as tmp:
             plugin = build_plugin(Path(tmp))
             plugin.config.schedule.sessions = _session_covering(datetime.now())

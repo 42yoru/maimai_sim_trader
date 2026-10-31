@@ -491,7 +491,7 @@ class ConfigUiSchemaTests(unittest.TestCase):
         self.assertTrue(plugin_block["config_version"]["disabled"])
 
         risk = self.raw["sections"]["risk"]["fields"]
-        self.assertEqual(risk["profile"]["choices"], ["steady", "aggressive", "yolo"])
+        self.assertEqual(risk["profile"]["choices"], ["steady", "aggressive", "yolo", "custom"])
 
 
 class WatchlistTests(unittest.TestCase):

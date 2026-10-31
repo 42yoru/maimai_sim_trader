@@ -7,10 +7,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Dict, Iterable, List, Optional
 
 import httpx
 import logging
+import math
 
 SNAPSHOT_URL = "https://qt.gtimg.cn/q="
 # 腾讯返回 GBK，且一次最多几十只比较稳
@@ -65,9 +67,12 @@ def _to_float(value: str, *, field: str, code: str) -> float:
     """安全取浮点；拿不到就说明行情的字段位置变了，直接报错。"""
 
     try:
-        return float(value)
+        parsed = float(value)
     except (TypeError, ValueError) as exc:
         raise QuoteError(f"解析 {code} 的 {field} 失败: {value!r}") from exc
+    if not math.isfinite(parsed):
+        raise QuoteError(f"解析 {code} 的 {field} 失败：数值不是有限值")
+    return parsed
 
 
 def parse_snapshot(text: str) -> Dict[str, Quote]:
@@ -111,6 +116,13 @@ def _parse_snapshot_line(raw: str) -> Quote:
     if len(fields) < 40:
         raise QuoteError(f"{symbol} 的字段数量异常：{len(fields)}")
     code = fields[2].strip()
+    updated_at = fields[30].strip()
+    if len(updated_at) != 14 or not updated_at.isdigit():
+        raise QuoteError(f"{code} 的行情时间戳无效: {updated_at!r}")
+    try:
+        datetime.strptime(updated_at, "%Y%m%d%H%M%S")
+    except ValueError as exc:
+        raise QuoteError(f"{code} 的行情时间戳无效: {updated_at!r}") from exc
     price = _to_float(fields[3], field="现价", code=code)
     suspended = price <= 0
     if suspended:
@@ -130,7 +142,7 @@ def _parse_snapshot_line(raw: str) -> Quote:
         turnover_wan=_to_float(fields[37], field="成交额", code=code),
         turnover_rate=_to_float(fields[38], field="换手率", code=code),
         pe=_to_float(fields[39], field="市盈率", code=code),
-        updated_at=fields[30].strip(),
+        updated_at=updated_at,
         suspended=suspended,
     )
 
