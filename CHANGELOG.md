@@ -311,7 +311,7 @@
   之后两者一起走
 - README 补一句「`sim_trader_query` 的 `status` / `orders` 目前不设门槛，
   将来若把 `[mx]` 指向真实账户，需要先把这两个 action 收进 `[owner] owners`」
-- README 文件结构标注 `scripts/` 仅开发者本地自检，不是运行时依赖
+- README 文件结构标注 `scripts/` 仅用于本地诊断，不是运行时依赖
 
 ## 0.6.3
 
@@ -355,7 +355,7 @@
 
 **细节**
 
-- `scripts/preflight.py` 头部写明「仅开发者本地自检，不属于插件运行时」，
+- `scripts/preflight.py` 头部写明「仅用于本地诊断，不属于插件运行时」，
   实例目录支持用 `MAIBOT_DIR` 覆盖；宿主库结构变化时给出可读的失败原因
 - manifest 补 `plugin_type: integration`
 - `config.toml.example` 的 `config_version` 对齐到 0.6.0；README 里 `max_tokens` 默认值由 2400 更正为 4000
@@ -366,7 +366,7 @@
 **细节**
 
 - 配置默认值去个人化：`[notify] group_ids` / `private_user_ids`、`[owner] owners` 默认改为空列表，
-  别人下载后不会往作者的群或账号发消息；已有 `config.toml` 里的值不受影响
+  安装后默认不会向任何群或账号发送消息；已有 `config.toml` 里的值不受影响
 - 没有 `[mx] api_key` 时不再启动后台循环，改为一条明确的 warning；
   填好 Key 保存后循环会自动开始（此前会在交易时段每轮抛一次异常）
 - 启动时检查最易漏填的几项（API Key / 播报目标 / 主人白名单），各给一条可照着做的提示
